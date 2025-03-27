@@ -1,0 +1,37 @@
+{
+  "name": "vision-cms-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension for creating and saving webpage snippets with AI-powered analysis",
+  "main": "index.js",
+  "scripts": {
+    "generate-icons": "node scripts/generate-icons.js",
+    "copy-assets": "node scripts/copy-assets.js",
+    "prebuild": "npm run generate-icons",
+    "build": "webpack --config webpack.config.js && npm run copy-assets",
+    "watch": "webpack --config webpack.config.js --watch",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "chrome-extension",
+    "screenshot",
+    "ai",
+    "vision"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/chrome": "^0.0.260",
+    "@types/html2canvas": "^1.0.0",
+    "@types/node": "^20.11.19",
+    "html2canvas": "^1.4.1",
+    "sharp": "^0.33.2",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.90.1",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {
+    "@types/html2canvas": "^0.5.35",
+    "html2canvas": "^1.4.1"
+  }
+}
