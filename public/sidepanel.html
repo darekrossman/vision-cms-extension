@@ -55,16 +55,19 @@
       background-color: #f5f5f5;
       color: #1a73e8;
       border: 2px solid #1a73e8;
-      border-radius: 50%;
-      width: 48px;
-      height: 48px;
+      border-radius: 8px;
+      padding: 12px 20px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 24px;
+      gap: 8px;
+      font-size: 14px;
+      font-weight: 500;
       cursor: pointer;
       margin: 16px auto;
       transition: all 0.2s ease;
+      width: auto;
+      min-width: 180px;
     }
     
     .icon-button:hover {
@@ -80,19 +83,122 @@
       outline: none;
       box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.4);
     }
+
+    .icon-button svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    .icon-button .select-icon {
+      display: inline;
+    }
+
+    .icon-button .cancel-icon {
+      display: none;
+    }
+
+    .icon-button.active .select-icon {
+      display: none;
+    }
+
+    .icon-button.active .cancel-icon {
+      display: inline;
+    }
     
     .image-preview {
       margin-top: 16px;
       border: 1px solid #e0e0e0;
-      border-radius: 4px;
+      border-radius: 12px;
       overflow: hidden;
       background-color: white;
+      height: 240px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     
     .image-preview img {
-      width: 100%;
-      height: auto;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
       display: block;
+    }
+    
+    .loading-spinner {
+      display: none;
+      width: 40px;
+      height: 40px;
+      border: 3px solid #e0e0e0;
+      border-radius: 50%;
+      border-top: 3px solid #1a73e8;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .analyze-button {
+      background-color: #1a73e8;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin: 16px auto;
+      display: none;
+      width: 100%;
+      max-width: 250px;
+      text-align: center;
+      transition: background-color 0.2s;
+    }
+    
+    .analyze-button:hover {
+      background-color: #1558b3;
+    }
+    
+    .analyze-button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+    
+    .analysis-results {
+      margin-top: 16px;
+      padding: 16px;
+      border-radius: 12px;
+      background-color: white;
+      border: 1px solid #e0e0e0;
+      font-size: 14px;
+      line-height: 1.5;
+      display: none;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    
+    .status {
+      margin-top: 16px;
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 14px;
+      display: none;
+    }
+    
+    .status.info {
+      background-color: #e8f0fe;
+      color: #1a73e8;
+    }
+    
+    .status.error {
+      background-color: #fce8e6;
+      color: #d93025;
+    }
+    
+    .status.success {
+      background-color: #e6f4ea;
+      color: #1e8e3e;
     }
   </style>
 </head>
@@ -103,12 +209,22 @@
   
   <div class="content">
     <button id="selection-toggle" class="icon-button" title="Toggle selection mode">
-      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M3 3h18v18H3z"></path>
         <path d="M8 8v8h8V8H8z"></path>
       </svg>
+      <svg class="cancel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="15" y1="9" x2="9" y2="15"></line>
+        <line x1="9" y1="9" x2="15" y2="15"></line>
+      </svg>
+      <span class="button-text">Select Area</span>
     </button>
-    <div id="image-preview" class="image-preview" style="display: none;"></div>
+    <div id="image-preview" class="image-preview" style="display: none;">
+      <div id="loading-spinner" class="loading-spinner"></div>
+    </div>
+    <button id="analyze-button" class="analyze-button">Analyze Content</button>
+    <div id="analysis-results" class="analysis-results"></div>
   </div>
 
   <script src="sidepanel.js"></script>

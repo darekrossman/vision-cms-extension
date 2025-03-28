@@ -25,4 +25,7 @@ build/
 
 # Server logs and environment files
 proxy-server/logs/
-proxy-server/.env 
+proxy-server/.env
+
+# Server environment files
+server/.env 

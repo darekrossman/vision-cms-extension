@@ -30,6 +30,24 @@ chrome.runtime
     logError("Failed to notify background of content script ready:", err);
   });
 
+// Add visibility change detection to automatically cancel selection when switching tabs
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && isSelecting) {
+    log("Page visibility changed to hidden, cancelling selection mode");
+    cancelSelection();
+
+    // Notify the sidepanel that selection was cancelled due to tab switch
+    chrome.runtime
+      .sendMessage({
+        action: "selectionCancelled",
+        reason: "tabSwitch",
+      })
+      .catch((err) => {
+        logError("Failed to notify about tab switch cancellation:", err);
+      });
+  }
+});
+
 // Set up message listener
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   log("Message received:", message.action, message);
@@ -360,18 +378,25 @@ function cleanupSelectionEventListeners(): void {
 
 // Cancel selection process
 function cancelSelection(): void {
-  console.log("Cancelling selection mode");
-  isSelecting = false;
+  log("Cancelling selection");
+
+  if (!isSelecting) {
+    log("Selection not active, ignoring cancel request");
+    return;
+  }
+
   if (selectionOverlay) {
     selectionOverlay.remove();
     selectionOverlay = null;
   }
-  startPoint = null;
-  selectedRect = null;
 
-  // Remove the selection prevention styles
+  startPoint = null;
+  isSelecting = false;
+
+  // Remove selection styles
   document.body.classList.remove("vision-cms-selecting");
   document.documentElement.classList.remove("vision-cms-selecting");
+
   const styleEl = document.getElementById("vision-cms-disable-selection-style");
   if (styleEl) {
     styleEl.remove();
@@ -384,81 +409,36 @@ function cancelSelection(): void {
   chrome.runtime.sendMessage({ action: "selectionCancelled" });
 }
 
-// Create capture visual indicator
-function createCaptureIndicator(message: string, color = "#1a73e8"): HTMLDivElement {
-  const indicator = document.createElement("div");
-  indicator.style.position = "fixed";
-  indicator.style.top = "20px";
-  indicator.style.left = "50%";
-  indicator.style.transform = "translateX(-50%)";
-  indicator.style.backgroundColor = color;
-  indicator.style.color = "white";
-  indicator.style.padding = "10px 20px";
-  indicator.style.borderRadius = "4px";
-  indicator.style.fontWeight = "bold";
-  indicator.style.zIndex = "2147483647";
-  indicator.style.boxShadow = "0 2px 10px rgba(0,0,0,0.2)";
-  indicator.textContent = message;
-
-  document.body.appendChild(indicator);
-  return indicator;
-}
-
-// Update the capture indicator
-function updateCaptureIndicator(
-  indicator: HTMLDivElement,
-  message: string,
-  color: string
-): void {
-  indicator.textContent = message;
-  indicator.style.backgroundColor = color;
-}
-
 // Process the selected area by sending to background script
 async function processSelection(rect: DOMRect): Promise<void> {
   console.log("Processing selection:", rect);
 
-  // Create a visual indicator
-  const indicator = createCaptureIndicator("Processing...");
-
   try {
+    // Notify that processing has started - this will show the loading skeleton in the side panel
+    chrome.runtime
+      .sendMessage({
+        action: "processingStarted",
+      })
+      .catch((err) => console.error("Failed to send processing started message:", err));
+
     // Hide the selection border to ensure it's not in the captured image
-    const selectionBorder = selectionOverlay?.querySelector(
-      ".vision-cms-selection-border"
-    ) as HTMLElement;
-    if (selectionBorder) {
-      selectionBorder.style.display = "none";
-    }
-
-    // Display a processing UI
     if (selectionOverlay) {
-      // Add a processing animation to the overlay
-      selectionOverlay.style.background = "transparent"; // Ensure overlay is transparent for capture
+      // Make sure all overlay elements are invisible for the capture
+      const selectionBorder = selectionOverlay.querySelector(
+        ".vision-cms-selection-border"
+      ) as HTMLElement;
+      if (selectionBorder) {
+        selectionBorder.style.display = "none";
+      }
 
-      // Add a loading spinner inside the overlay
-      const spinner = document.createElement("div");
-      spinner.style.position = "absolute";
-      spinner.style.top = "50%";
-      spinner.style.left = "50%";
-      spinner.style.transform = "translate(-50%, -50%)";
-      spinner.style.width = "40px";
-      spinner.style.height = "40px";
-      spinner.style.border = "4px solid rgba(255, 255, 255, 0.3)";
-      spinner.style.borderTop = "4px solid #1a73e8";
-      spinner.style.borderRadius = "50%";
-      spinner.style.animation = "vision-cms-spin 1s linear infinite";
+      // Set all panels to transparent
+      const panels = selectionOverlay.querySelectorAll(".vision-cms-overlay-panel");
+      panels.forEach((panel) => {
+        (panel as HTMLElement).style.backgroundColor = "transparent";
+      });
 
-      // Add the animation keyframes
-      const style = document.createElement("style");
-      style.textContent = `
-        @keyframes vision-cms-spin {
-          0% { transform: translate(-50%, -50%) rotate(0deg); }
-          100% { transform: translate(-50%, -50%) rotate(360deg); }
-        }
-      `;
-      document.head.appendChild(style);
-
-      selectionOverlay.appendChild(spinner);
+      // Ensure overlay is transparent for capture
+      selectionOverlay.style.background = "transparent";
     }
 
     // Allow a brief moment for the UI to update before capturing
@@ -477,24 +457,21 @@ async function processSelection(rect: DOMRect): Promise<void> {
 
     console.log("Background script response:", response);
 
-    // Show success indicator
-    updateCaptureIndicator(indicator, "Processed!", "green");
-
-    // Remove the selection overlay but stay in selection mode
+    // Remove the selection overlay completely
     if (selectionOverlay) {
       selectionOverlay.remove();
       selectionOverlay = null;
     }
     startPoint = null;
-
-    // Auto-remove indicator after delay
-    setTimeout(() => indicator.remove(), 3000);
   } catch (error) {
     console.error("Processing failed:", error);
 
-    // Show error
-    updateCaptureIndicator(indicator, "Error!", "red");
-    setTimeout(() => indicator.remove(), 3000);
+    // Remove selection overlay even on error
+    if (selectionOverlay) {
+      selectionOverlay.remove();
+      selectionOverlay = null;
+    }
+    startPoint = null;
 
     throw error;
   }

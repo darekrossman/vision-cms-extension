@@ -32,6 +32,8 @@
   },
   "dependencies": {
     "@types/html2canvas": "^0.5.35",
-    "html2canvas": "^1.4.1"
+    "html2canvas": "^1.4.1",
+    "marked": "^15.0.7",
+    "multer": "^1.4.5-lts.2"
   }
 }

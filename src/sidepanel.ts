@@ -14,6 +14,7 @@ const { log, error: logError } = createSidePanelLogger();
 
 // Track if capture is in progress
 let captureInProgress = false;
+let analysisInProgress = false;
 
 // Store the latest image URL
 let latestImageUrl: string | null = null;
@@ -44,14 +45,17 @@ document.addEventListener("DOMContentLoaded", () => {
       logError("Failed to get active tab", err);
     });
 
-  // Get reference to toggle button
+  // Get reference to toggle button and analyze button
   const selectionToggle = document.getElementById(
     "selection-toggle"
+  ) as HTMLButtonElement | null;
+  const analyzeButton = document.getElementById(
+    "analyze-button"
   ) as HTMLButtonElement | null;
   const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
 
   // Validate UI elements
-  if (!selectionToggle || !imagePreview) {
+  if (!selectionToggle || !analyzeButton || !imagePreview) {
     logError("Required UI elements not found in DOM");
     return;
   }
@@ -73,9 +77,6 @@ document.addEventListener("DOMContentLoaded", () => {
       updateSelectionToggleState(isSelectionModeActive, selectionToggle);
 
       if (isSelectionModeActive) {
-        // Show loading indicator for better feedback
-        showStatus("Starting selection mode...", "info");
-
         // Start selection mode
         const response = await chrome.runtime.sendMessage({
           action: "startSelection",
@@ -89,17 +90,8 @@ document.addEventListener("DOMContentLoaded", () => {
           isSelectionModeActive = false;
           updateSelectionToggleState(false, selectionToggle);
           logError("Error starting selection:", response.message);
-          showStatus(
-            "Error: " + (response.message || "Failed to start selection"),
-            "error"
-          );
-        } else {
-          showStatus("Select an area on the page", "info");
         }
       } else {
-        // Show loading indicator
-        showStatus("Cancelling selection mode...", "info");
-
         // Cancel selection mode
         const response = await chrome.runtime.sendMessage({
           action: "cancelSelection",
@@ -110,13 +102,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (response && response.status === "error") {
           logError("Error cancelling selection:", response.message);
-          showStatus(
-            "Error: " + (response.message || "Failed to cancel selection"),
-            "error"
-          );
-          // Don't revert the UI state since we've already cancelled locally
-        } else {
-          showStatus("Selection mode cancelled", "info");
         }
       }
     } catch (error) {
@@ -128,12 +113,42 @@ document.addEventListener("DOMContentLoaded", () => {
       // Revert the toggle state on error
       isSelectionModeActive = wasActive;
       updateSelectionToggleState(wasActive, selectionToggle);
+    }
+  });
 
-      // Show error status
-      showStatus(
-        `Error: ${error instanceof Error ? error.message : String(error)}`,
-        "error"
-      );
+  // Set up analyze button event listener
+  analyzeButton.addEventListener("click", async () => {
+    if (!latestImageUrl || analysisInProgress) {
+      return;
+    }
+
+    try {
+      analysisInProgress = true;
+      analyzeButton.disabled = true;
+      analyzeButton.textContent = "Analyzing...";
+
+      // Send the image for analysis
+      const response = await chrome.runtime.sendMessage({
+        action: "analyzeImage",
+        imageUrl: latestImageUrl,
+      });
+
+      log("Background service worker response for analysis:", response);
+
+      if (response && response.status === "error") {
+        logError("Error analyzing image:", response.message);
+        analyzeButton.textContent = "Analysis Failed";
+        setTimeout(() => {
+          analyzeButton.disabled = false;
+          analyzeButton.textContent = "Analyze Content";
+        }, 3000);
+      }
+    } catch (error) {
+      logError("Failed to analyze image", error);
+      analyzeButton.disabled = false;
+      analyzeButton.textContent = "Analyze Content";
+    } finally {
+      analysisInProgress = false;
     }
   });
 
@@ -146,8 +161,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // Let the background script know we're ready
   notifyBackgroundReady();
 
-  // Initialize the UI elements and event listeners
-  initializeUI();
+  // Listen for window resize to adjust UI
+  window.addEventListener("resize", updateUILayout);
 });
 
 // Reset UI to initial state
@@ -157,7 +172,13 @@ function resetUI(): void {
   const selectionToggle = document.getElementById(
     "selection-toggle"
   ) as HTMLButtonElement | null;
+  const analyzeButton = document.getElementById(
+    "analyze-button"
+  ) as HTMLButtonElement | null;
   const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
+  const loadingSpinner = document.getElementById(
+    "loading-spinner"
+  ) as HTMLDivElement | null;
 
   if (selectionToggle && imagePreview) {
     // Reset toggle button
@@ -166,22 +187,34 @@ function resetUI(): void {
 
     // Reset image preview
     imagePreview.style.display = "none";
-    imagePreview.innerHTML = "";
+
+    // Clear any existing images
+    const existingImages = imagePreview.querySelectorAll("img");
+    existingImages.forEach((img) => img.remove());
+
+    // Reset loading spinner
+    if (loadingSpinner) {
+      loadingSpinner.style.display = "none";
+    }
   }
 
   captureInProgress = false;
   latestImageUrl = null;
 
-  if (imageContainer) {
-    imageContainer.innerHTML = "";
+  if (analyzeButton) {
+    analyzeButton.style.display = "none";
+    analyzeButton.disabled = false;
+    analyzeButton.textContent = "Analyze Content";
   }
 
-  if (loadingIndicator) {
-    loadingIndicator.style.display = "none";
-  }
+  const analysisResults = document.getElementById(
+    "analysis-results"
+  ) as HTMLDivElement | null;
 
-  showStatus("Ready to capture", "info");
-  updateButtonState();
+  if (analysisResults) {
+    analysisResults.style.display = "none";
+    analysisResults.textContent = "";
+  }
 }
 
 // Set up message listener
@@ -202,6 +235,11 @@ function setupMessageListener(): void {
         sendResponse({ status: "ok" });
         break;
 
+      case "processingStarted":
+        handleProcessingStarted();
+        sendResponse({ status: "ok" });
+        break;
+
       case "screenshotCaptured":
         if (message.data) {
           handleScreenshotCaptured(message.data);
@@ -212,17 +250,33 @@ function setupMessageListener(): void {
       case "imageProcessed":
         log("Processed image received:", message.imageUrl);
         displayImage(message.imageUrl);
+        showAnalyzeButton();
+        sendResponse({ status: "ok" });
+        break;
+
+      case "analysisComplete":
+        log("Analysis received:", message.analysis);
+        displayAnalysis(message.analysis);
         sendResponse({ status: "ok" });
         break;
 
       case "processingError":
         logError("Processing error:", message.error);
-        showStatus(`Error: ${message.error}`, "error");
         captureInProgress = false;
-        updateButtonState();
-        if (loadingIndicator) {
-          loadingIndicator.style.display = "none";
+
+        // Hide loading spinner on error
+        const loadingSpinner = document.getElementById(
+          "loading-spinner"
+        ) as HTMLDivElement | null;
+        if (loadingSpinner) {
+          loadingSpinner.style.display = "none";
         }
+        sendResponse({ status: "ok" });
+        break;
+
+      case "analysisError":
+        logError("Analysis error:", message.error);
+        handleAnalysisError(message.error);
         sendResponse({ status: "ok" });
         break;
 
@@ -258,7 +312,7 @@ function handleSelectionCancelled(): void {
   ) as HTMLButtonElement | null;
 
   if (selectionToggle) {
-    selectionToggle.classList.remove("active");
+    updateSelectionToggleState(false, selectionToggle);
     isSelectionModeActive = false;
     log("Selection mode deactivated");
   }
@@ -269,184 +323,69 @@ function handleScreenshotCaptured(dataUrl: string): void {
   log("Handling screenshot captured, data length:", dataUrl.length);
 
   const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
+  const loadingSpinner = document.getElementById(
+    "loading-spinner"
+  ) as HTMLDivElement | null;
 
-  if (!imagePreview) {
-    logError("Image preview element not found");
+  if (!imagePreview || !loadingSpinner) {
+    logError("Image preview or loading spinner element not found");
     return;
   }
 
-  // Clear existing content
-  imagePreview.innerHTML = "";
+  // Show the image preview container and loading spinner
+  imagePreview.style.display = "flex";
+  loadingSpinner.style.display = "block";
 
-  // Create and add image
-  const img = document.createElement("img");
-  img.src = dataUrl;
-  img.alt = "Captured Snapshot";
-
-  imagePreview.appendChild(img);
-  imagePreview.style.display = "block";
-
-  log("Image preview updated with screenshot");
-}
-
-// Initialize the UI elements and event listeners
-function initializeUI(): void {
-  log("Initializing UI");
-
-  // Get UI elements
-  startButton = document.getElementById("startSelectionButton") as HTMLButtonElement;
-  processButton = document.getElementById("processImageButton") as HTMLButtonElement;
-  imageContainer = document.getElementById("imageContainer") as HTMLDivElement;
-  loadingIndicator = document.getElementById("loadingIndicator") as HTMLDivElement;
-  statusMessage = document.getElementById("statusMessage") as HTMLDivElement;
-
-  if (
-    !startButton ||
-    !processButton ||
-    !imageContainer ||
-    !loadingIndicator ||
-    !statusMessage
-  ) {
-    logError("Failed to find required UI elements");
-    return;
-  }
-
-  // Hide loading indicator and process button initially
-  loadingIndicator.style.display = "none";
-  processButton.style.display = "none";
-
-  // Set up event listeners
-  startButton.addEventListener("click", startSelection);
-  processButton.addEventListener("click", processImage);
-
-  // Listen for window resize to adjust UI
-  window.addEventListener("resize", updateUILayout);
-
-  // Update layout initially
-  updateUILayout();
-}
-
-// Notify background script that sidepanel is open
-function notifyBackgroundScript(): void {
-  log("Notifying background script");
-  chrome.runtime.sendMessage({ action: "sidePanelOpened" }, (response) => {
-    if (chrome.runtime.lastError) {
-      logError("Error notifying background script:", chrome.runtime.lastError);
-      showStatus(
-        "Background script not available. Please reload the extension.",
-        "error"
-      );
-    } else {
-      log("Background script notified:", response);
-      showStatus("Ready to capture", "info");
-    }
-  });
-}
-
-// Start the selection process in the active tab
-function startSelection(): void {
-  log("Starting selection");
-
-  if (captureInProgress) {
-    log("Capture already in progress, ignoring");
-    return;
-  }
-
-  captureInProgress = true;
-  updateButtonState();
-  showStatus("Select an area on the page...", "info");
-
-  chrome.runtime.sendMessage({ action: "startSelection" }, (response) => {
-    if (chrome.runtime.lastError) {
-      logError("Error starting selection:", chrome.runtime.lastError);
-      showStatus("Error starting selection. Please try again.", "error");
-      captureInProgress = false;
-      updateButtonState();
-    } else if (response && response.status === "error") {
-      logError("Error response from background:", response.message);
-      showStatus(response.message || "Error starting selection", "error");
-      captureInProgress = false;
-      updateButtonState();
-    } else {
-      log("Selection started successfully");
-    }
-  });
-}
-
-// Process the current image (not used with server-side processing approach)
-function processImage(): void {
-  log("Process image button clicked");
-  // This function is retained for backward compatibility but not used in server-side processing
-}
-
-// Update button states based on current status
-function updateButtonState(): void {
-  if (!startButton || !processButton) return;
-
-  startButton.disabled = captureInProgress;
-  processButton.style.display = latestImageUrl ? "block" : "none";
-}
-
-// Show status message with appropriate styling
-function showStatus(message: string, type: "info" | "error" | "success"): void {
-  if (!statusMessage) return;
-
-  statusMessage.textContent = message;
-  statusMessage.className = `status ${type}`;
-  statusMessage.style.display = "block";
+  log("Loading spinner displayed while processing image");
 }
 
 // Update UI layout based on window size
 function updateUILayout(): void {
-  // Adjust any size-dependent UI elements
-  if (imageContainer) {
-    const maxHeight = window.innerHeight - 200; // Allow space for buttons and status
-    imageContainer.style.maxHeight = `${maxHeight}px`;
-  }
+  // Nothing to adjust with fixed height
 }
 
 // Display image in the side panel
 function displayImage(imageUrl: string): void {
-  if (!imageContainer) return;
+  // Get the image preview element
+  const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
+  const loadingSpinner = document.getElementById(
+    "loading-spinner"
+  ) as HTMLDivElement | null;
 
-  // Clear previous content
-  imageContainer.innerHTML = "";
+  if (!imagePreview || !loadingSpinner) {
+    logError("Image preview or loading spinner element not found");
+    return;
+  }
+
+  // Hide the loading spinner
+  loadingSpinner.style.display = "none";
 
   // Create image element
   const img = document.createElement("img");
   img.src = imageUrl;
-  img.style.maxWidth = "100%";
-  img.style.height = "auto";
   img.alt = "Captured screenshot";
   img.onload = () => {
     log("Image loaded successfully");
-
-    // Hide loading indicator once image is loaded
-    if (loadingIndicator) {
-      loadingIndicator.style.display = "none";
-    }
-
-    // Update status
-    showStatus("Image processed successfully", "success");
-
-    // Reset capture in progress
     captureInProgress = false;
-    updateButtonState();
   };
 
   img.onerror = () => {
     logError("Error loading image");
-    showStatus("Error loading image", "error");
-
-    // Reset capture in progress
     captureInProgress = false;
-    updateButtonState();
   };
 
-  imageContainer.appendChild(img);
+  // Remove any existing images to avoid duplicates
+  const existingImages = imagePreview.querySelectorAll("img");
+  existingImages.forEach((img) => img.remove());
+
+  // Add the new image
+  imagePreview.appendChild(img);
 
   // Store latest image URL
   latestImageUrl = imageUrl;
+
+  // Show analyze button when image is displayed
+  showAnalyzeButton();
 }
 
 // Helper function to update the selection toggle UI state
@@ -456,9 +395,88 @@ function updateSelectionToggleState(
 ): void {
   if (active) {
     toggleButton.classList.add("active");
-    toggleButton.textContent = "Cancel Selection";
+    const buttonText = toggleButton.querySelector(".button-text");
+    if (buttonText) {
+      buttonText.textContent = "Cancel Selection";
+    }
   } else {
     toggleButton.classList.remove("active");
-    toggleButton.textContent = "Start Selection";
+    const buttonText = toggleButton.querySelector(".button-text");
+    if (buttonText) {
+      buttonText.textContent = "Select Area";
+    }
   }
+}
+
+// Add the handleProcessingStarted function
+function handleProcessingStarted(): void {
+  log("Handling processing started");
+
+  const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
+  const loadingSpinner = document.getElementById(
+    "loading-spinner"
+  ) as HTMLDivElement | null;
+
+  if (!imagePreview || !loadingSpinner) {
+    logError("Image preview or loading spinner element not found");
+    return;
+  }
+
+  // Show the image preview container and loading spinner
+  imagePreview.style.display = "flex";
+  loadingSpinner.style.display = "block";
+
+  log("Loading spinner displayed while processing image");
+}
+
+// Show analyze button
+function showAnalyzeButton(): void {
+  const analyzeButton = document.getElementById(
+    "analyze-button"
+  ) as HTMLButtonElement | null;
+
+  if (analyzeButton && latestImageUrl) {
+    analyzeButton.style.display = "block";
+    analyzeButton.disabled = false;
+    analyzeButton.textContent = "Analyze Content";
+  }
+}
+
+// Display analysis in the side panel
+function displayAnalysis(analysis: string): void {
+  const analysisResults = document.getElementById(
+    "analysis-results"
+  ) as HTMLDivElement | null;
+  const analyzeButton = document.getElementById(
+    "analyze-button"
+  ) as HTMLButtonElement | null;
+
+  if (!analysisResults || !analyzeButton) {
+    logError("Analysis results or analyze button element not found");
+    return;
+  }
+
+  // Reset the button
+  analyzeButton.disabled = false;
+  analyzeButton.textContent = "Analyze Content";
+
+  // Display the analysis
+  analysisResults.textContent = analysis;
+  analysisResults.style.display = "block";
+
+  analysisInProgress = false;
+}
+
+// Handle analysis error
+function handleAnalysisError(errorMessage: string): void {
+  const analyzeButton = document.getElementById(
+    "analyze-button"
+  ) as HTMLButtonElement | null;
+
+  if (analyzeButton) {
+    analyzeButton.disabled = false;
+    analyzeButton.textContent = "Analyze Content";
+  }
+
+  analysisInProgress = false;
 }

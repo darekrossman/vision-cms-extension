@@ -2,6 +2,7 @@ import { createBackgroundLogger, generateFilename } from "./utils";
 
 // Configuration
 const API_ENDPOINT = "http://localhost:3000/process-image";
+const ANALYSIS_ENDPOINT = "http://localhost:3000/analyze-image";
 
 // Default prompt for image analysis
 const DEFAULT_PROMPT = "Describe what's in this image and extract any text content.";
@@ -262,6 +263,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: "ok" });
       break;
 
+    case "analyzeImage":
+      handleAnalyzeImage(message.imageUrl, sendResponse);
+      return true;
+
     default:
       log("Unknown message action:", message.action);
       sendResponse({ status: "error", message: "Unknown action" });
@@ -360,6 +365,72 @@ async function handleProcessSelection(
     // Notify the side panel of the error
     chrome.runtime.sendMessage({
       action: "processingError",
+      error: errorMessage,
+    });
+
+    sendResponse({ status: "error", message: errorMessage });
+  }
+}
+
+// Handle image analysis request
+async function handleAnalyzeImage(
+  imageUrl: string,
+  sendResponse: Function
+): Promise<void> {
+  log("Handling analyzeImage request for image URL:", imageUrl);
+
+  if (!imageUrl) {
+    logError("No image URL provided for analysis");
+    sendResponse({ status: "error", message: "No image URL provided" });
+    return;
+  }
+
+  try {
+    log("Sending image to Anthropic for analysis");
+
+    // Create form data for the request
+    const formData = new FormData();
+    formData.append("imageUrl", imageUrl);
+    formData.append("prompt", DEFAULT_PROMPT);
+
+    // Send to the server for analysis
+    const response = await fetch(ANALYSIS_ENDPOINT, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    // Handle both new and legacy response formats
+    const analysisContent =
+      data.analysis || data.content || data.result || data.text || "";
+
+    if (!analysisContent) {
+      log("Server response:", JSON.stringify(data));
+      throw new Error("No analysis content found in server response");
+    }
+
+    log("Analysis completed successfully");
+
+    // Notify the side panel of the successful analysis
+    chrome.runtime.sendMessage({
+      action: "analysisComplete",
+      analysis: analysisContent,
+      timestamp: new Date().toISOString(),
+    });
+
+    sendResponse({ status: "ok", analysis: analysisContent });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logError("Error analyzing image:", errorMessage);
+
+    // Notify the side panel of the error
+    chrome.runtime.sendMessage({
+      action: "analysisError",
       error: errorMessage,
     });
 
