@@ -804,7 +804,7 @@ async function handleChatMessage(message: string, sendResponse: Function): Promi
     const formData = new FormData();
     formData.append("message", message);
 
-    // Send to the server for processing
+    // Send to the server with fetch for SSE support
     const response = await fetch(CHAT_ENDPOINT, {
       method: "POST",
       body: formData,
@@ -814,23 +814,64 @@ async function handleChatMessage(message: string, sendResponse: Function): Promi
       throw new Error(`Server error: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json();
-
-    if (!data.success) {
-      throw new Error(data.error || "Unknown error occurred");
+    if (!response.body) {
+      throw new Error("Response body is null");
     }
 
-    const chatContent = data.content || "";
-
-    log("Chat response received successfully");
-
-    // Notify the side panel of the successful chat response
-    chrome.runtime.sendMessage({
-      action: "chatResponse",
-      content: chatContent,
-    });
-
+    // Send the initial OK response to unblock the UI
     sendResponse({ status: "ok" });
+
+    // Set up SSE reader
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+
+      if (done) {
+        log("SSE stream complete");
+        break;
+      }
+
+      // Decode the chunk and add to buffer
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete events in buffer
+      const events = parseSSEEvents(buffer);
+      buffer = events.remainder;
+
+      // Handle each complete event
+      for (const event of events.parsed) {
+        log(`Received SSE event: ${event.type}`);
+
+        switch (event.type) {
+          case "tool":
+            // Forward tool usage information to sidepanel
+            chrome.runtime.sendMessage({
+              action: "chatToolUsage",
+              toolInfo: event.data,
+            });
+            break;
+
+          case "complete":
+            // Forward the final response to sidepanel
+            chrome.runtime.sendMessage({
+              action: "chatResponse",
+              content: event.data.content,
+            });
+            break;
+
+          case "error":
+            // Forward error to sidepanel
+            chrome.runtime.sendMessage({
+              action: "chatError",
+              error: event.data.details || event.data.error,
+            });
+            break;
+        }
+      }
+    }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     logError("Error processing chat message:", errorMessage);
@@ -841,6 +882,48 @@ async function handleChatMessage(message: string, sendResponse: Function): Promi
       error: errorMessage,
     });
 
+    // Only send error response if we haven't already sent an OK
+    // This handles errors that occur before we start processing the stream
     sendResponse({ status: "error", message: errorMessage });
   }
+}
+
+// Helper function to parse SSE events from a buffer
+function parseSSEEvents(buffer: string): {
+  parsed: Array<{ type: string; data: any }>;
+  remainder: string;
+} {
+  const events: Array<{ type: string; data: any }> = [];
+  const lines = buffer.split("\n\n");
+
+  // The last item might be incomplete, so we'll keep it as remainder
+  const remainder = lines.pop() || "";
+
+  for (const eventBlock of lines) {
+    try {
+      const eventLines = eventBlock.split("\n");
+      let eventType = "";
+      let eventData = "";
+
+      for (const line of eventLines) {
+        if (line.startsWith("event: ")) {
+          eventType = line.substring(7);
+        } else if (line.startsWith("data: ")) {
+          eventData = line.substring(6);
+        }
+      }
+
+      if (eventType && eventData) {
+        events.push({
+          type: eventType,
+          data: JSON.parse(eventData),
+        });
+      }
+    } catch (e) {
+      logError("Error parsing SSE event:", e);
+      // Skip invalid events
+    }
+  }
+
+  return { parsed: events, remainder };
 }

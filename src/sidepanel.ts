@@ -393,6 +393,11 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       sendResponse({ status: "success" });
       break;
 
+    case "chatToolUsage":
+      displayToolUsage(message.toolInfo);
+      sendResponse({ status: "success" });
+      break;
+
     default:
       log("Unknown message action received:", message.action);
       sendResponse({ status: "ignored", reason: "Unknown action" });
@@ -986,6 +991,9 @@ function addMessageToChat(role: "user" | "assistant", content: string): void {
 function showThinkingIndicator(): void {
   if (!chatMessages) return;
 
+  // Remove any existing thinking indicator first
+  hideThinkingIndicator();
+
   isChatLoading = true;
 
   const thinkingElement = document.createElement("div");
@@ -1046,4 +1054,88 @@ async function sendChatMessage(message: string): Promise<void> {
       "Sorry, there was an error sending your message. Please try again."
     );
   }
+}
+
+// Display tool usage information in the chat
+function displayToolUsage(toolInfo: {
+  name: string;
+  status: string;
+  description: string;
+}): void {
+  if (!chatMessages) return;
+
+  // Remove existing tool message with the same name if it exists
+  const existingToolMessages = document.querySelectorAll(
+    `.chat-tool-message[data-tool="${toolInfo.name}"]`
+  );
+  existingToolMessages.forEach((element) => element.remove());
+
+  const toolElement = document.createElement("div");
+  toolElement.className = `chat-tool-message ${toolInfo.status}`;
+  toolElement.setAttribute("data-tool", toolInfo.name);
+
+  // Create left side with icon and tool name
+  const leftContainer = document.createElement("div");
+  leftContainer.className = "tool-left";
+
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "tool-icon";
+
+  // Different icons for different statuses
+  if (toolInfo.status === "started") {
+    iconSpan.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+  } else if (toolInfo.status === "completed") {
+    iconSpan.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+  } else if (toolInfo.status === "failed") {
+    iconSpan.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`;
+  }
+
+  const textSpan = document.createElement("span");
+  textSpan.className = "tool-text";
+
+  // Extract tool name from description for cleaner display
+  const toolName = toolInfo.name.replace(/_/g, " ");
+  textSpan.textContent = toolName;
+
+  leftContainer.appendChild(iconSpan);
+  leftContainer.appendChild(textSpan);
+
+  // Create right side with status
+  const rightContainer = document.createElement("div");
+  rightContainer.className = "tool-right";
+
+  let statusText = "";
+  if (toolInfo.status === "started") {
+    statusText = "Running";
+  } else if (toolInfo.status === "completed") {
+    statusText = "Completed";
+  } else if (toolInfo.status === "failed") {
+    statusText = "Failed";
+  }
+
+  rightContainer.textContent = statusText;
+
+  // Add containers to the tool element
+  toolElement.appendChild(leftContainer);
+  toolElement.appendChild(rightContainer);
+
+  // Add the tool element to chat - don't remove thinking indicator
+  // Insert the tool message before the thinking indicator if it exists
+  const thinkingIndicator = document.getElementById("chat-thinking");
+
+  if (thinkingIndicator && chatMessages.contains(thinkingIndicator)) {
+    chatMessages.insertBefore(toolElement, thinkingIndicator);
+  } else {
+    chatMessages.appendChild(toolElement);
+
+    // If tool is starting and there's no thinking indicator, show it
+    if (toolInfo.status === "started" && !document.getElementById("chat-thinking")) {
+      showThinkingIndicator();
+    }
+  }
+
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  // For completed/failed tools, don't affect the thinking indicator
+  // It should remain visible as long as the overall process is ongoing
 }

@@ -634,6 +634,68 @@
     .chat-thinking-dot:nth-child(3) {
       animation-delay: 0.4s;
     }
+    
+    /* Tool usage in chat */
+    .chat-tool-message {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      background-color: rgba(0, 0, 0, 0.05);
+      border-radius: 8px;
+      margin: 4px 0;
+      align-self: stretch;
+      width: 100%;
+      box-shadow: var(--shadow-sm);
+      transition: opacity 0.2s ease;
+    }
+    
+    .tool-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    
+    .tool-right {
+      font-size: 11px;
+      font-weight: 500;
+    }
+    
+    .tool-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .chat-tool-message.started .tool-icon {
+      color: var(--info-color);
+    }
+    
+    .chat-tool-message.completed .tool-icon {
+      color: var(--success-color);
+    }
+    
+    .chat-tool-message.failed .tool-icon {
+      color: var(--error-color);
+    }
+    
+    .chat-tool-message.started .tool-right {
+      color: var(--info-color);
+    }
+    
+    .chat-tool-message.completed .tool-right {
+      color: var(--success-color);
+    }
+    
+    .chat-tool-message.failed .tool-right {
+      color: var(--error-color);
+    }
+    
+    .tool-text {
+      font-weight: 500;
+    }
   </style>
 </head>
 <body>

@@ -922,6 +922,17 @@ app.post('/chat', upload.none(), async (req, res) => {
       )
     );
 
+    // Create SSE response
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // Helper function to send SSE events
+    const sendEvent = (eventType, data) => {
+      res.write(`event: ${eventType}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
     // Initialize Anthropic client
     const anthropic = new Anthropic({
       apiKey: ANTHROPIC_API_KEY,
@@ -1043,12 +1054,15 @@ app.post('/chat', upload.none(), async (req, res) => {
 
     // *** Tool Use Loop ***
     let apiResponse;
-    while (true) {
-      console.log(`Calling Anthropic API... Messages count: ${messages.length}`);
-      apiResponse = await anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20240620', // Using 3.5 Sonnet for better tool use
-        max_tokens: 4096,
-        system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
+    let finalContent = '';
+    
+    try {
+      while (true) {
+        console.log(`Calling Anthropic API... Messages count: ${messages.length}`);
+        apiResponse = await anthropic.messages.create({
+          model: 'claude-3-5-sonnet-20240620', // Using 3.5 Sonnet for better tool use
+          max_tokens: 4096,
+          system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
 
 ## Core Capabilities
 
@@ -1256,68 +1270,115 @@ When creating an entry with taxonomy fields:
 
 You are a collaborative assistant who helps users better understand their content ecosystems and make informed decisions about content management strategies.
 `,
-        messages: messages,
-        tools: tools, // Pass the defined tools here
-      });
-
-      console.log(`Anthropic response stop_reason: ${apiResponse.stop_reason}`);
-
-      // Check if the response requires tool use
-      if (apiResponse.stop_reason === 'tool_use') {
-        const toolUses = apiResponse.content.filter(
-          (block) => block.type === 'tool_use'
-        );
-
-        // Add the assistant's tool use request message to history
-        messages.push({ role: apiResponse.role, content: apiResponse.content });
-
-        // Execute tools and gather results
-        const toolResults = [];
-        for (const toolUse of toolUses) {
-          const toolName = toolUse.name;
-          const toolInput = toolUse.input;
-          const toolUseId = toolUse.id;
-
-          const result = await executeTool(toolName, toolInput);
-
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: toolUseId,
-            content: JSON.stringify(result), // Send result back as a JSON string
-          });
-        }
-
-        // Add the tool results to the message history
-        messages.push({
-          role: 'user', // Role is 'user' for tool_result messages
-          content: toolResults,
+          messages: messages,
+          tools: tools, // Pass the defined tools here
         });
-        // Continue the loop to send results back to Anthropic
-      } else if (apiResponse.stop_reason === 'end_turn') {
-        // If no tool use is needed, break the loop
-        break;
-      } else {
-        // Handle other stop reasons if necessary (e.g., 'max_tokens')
-        console.warn(`Unexpected stop_reason: ${apiResponse.stop_reason}`);
-        break;
-      }
-    } // End of while loop
 
-    // Extract the final text content from the response
-    const finalContent = apiResponse.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n');
+        console.log(`Anthropic response stop_reason: ${apiResponse.stop_reason}`);
 
-    console.log(
-      `Chat response successful. Response length: ${finalContent.length} chars`
-    );
+        // Check if the response requires tool use
+        if (apiResponse.stop_reason === 'tool_use') {
+          const toolUses = apiResponse.content.filter(
+            (block) => block.type === 'tool_use'
+          );
 
-    // Send final response
-    res.json({
-      success: true,
-      content: finalContent,
-    });
+          // Add the assistant's tool use request message to history
+          messages.push({ role: apiResponse.role, content: apiResponse.content });
+
+          // Send tool usage events to client
+          for (const toolUse of toolUses) {
+            const toolName = toolUse.name;
+            sendEvent('tool', { 
+              name: toolName,
+              status: 'started',
+              description: `Using tool: ${toolName}`
+            });
+          }
+
+          // Execute tools and gather results
+          const toolResults = [];
+          for (const toolUse of toolUses) {
+            const toolName = toolUse.name;
+            const toolInput = toolUse.input;
+            const toolUseId = toolUse.id;
+
+            try {
+              const result = await executeTool(toolName, toolInput);
+              
+              // Send tool completion event
+              sendEvent('tool', { 
+                name: toolName,
+                status: 'completed',
+                description: `Tool ${toolName} completed successfully`
+              });
+
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: JSON.stringify(result), // Send result back as a JSON string
+              });
+            } catch (toolError) {
+              console.error(`Error executing tool ${toolName}:`, toolError);
+              
+              // Send tool error event
+              sendEvent('tool', { 
+                name: toolName,
+                status: 'failed',
+                description: `Tool ${toolName} failed: ${toolError.message}`
+              });
+
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUseId,
+                content: JSON.stringify({ error: toolError.message }),
+                is_error: true
+              });
+            }
+          }
+
+          // Add the tool results to the message history
+          messages.push({
+            role: 'user', // Role is 'user' for tool_result messages
+            content: toolResults,
+          });
+          // Continue the loop to send results back to Anthropic
+        } else if (apiResponse.stop_reason === 'end_turn') {
+          // If no tool use is needed, break the loop
+          break;
+        } else {
+          // Handle other stop reasons if necessary (e.g., 'max_tokens')
+          console.warn(`Unexpected stop_reason: ${apiResponse.stop_reason}`);
+          break;
+        }
+      } // End of while loop
+
+      // Extract the final text content from the response
+      finalContent = apiResponse.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n');
+
+      console.log(
+        `Chat response successful. Response length: ${finalContent.length} chars`
+      );
+
+      // Send the final content event
+      sendEvent('complete', {
+        success: true,
+        content: finalContent,
+      });
+      
+      // End the response
+      res.end();
+      
+    } catch (apiError) {
+      console.error('Error in API communication:', apiError);
+      sendEvent('error', {
+        error: "Error communicating with AI service",
+        details: apiError.message,
+      });
+      res.end();
+    }
   } catch (error) {
     console.error('Error processing chat:', error);
 
@@ -1337,10 +1398,21 @@ You are a collaborative assistant who helps users better understand their conten
       ),
     );
 
-    res.status(500).json({
-      error: "Failed to process chat",
-      details: error.message,
-    });
+    // If we haven't sent headers yet, send a regular JSON error response
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: "Failed to process chat",
+        details: error.message,
+      });
+    } else {
+      // If headers are already sent (SSE started), send an error event
+      res.write(`event: error\n`);
+      res.write(`data: ${JSON.stringify({ 
+        error: "Failed to process chat",
+        details: error.message
+      })}\n\n`);
+      res.end();
+    }
   }
 });
 
