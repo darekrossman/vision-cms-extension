@@ -356,8 +356,8 @@ function setupSelectionEventListeners(): void {
           (panel as HTMLElement).style.display = "none";
         });
 
-        // Reset background color
-        selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0.1)";
+        // Use completely transparent background
+        selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0)";
       }
       startPoint = null;
     }
@@ -459,10 +459,39 @@ async function processSelection(rect: DOMRect): Promise<void> {
       // Continue anyway
     }
 
-    // Reset the overlay to a clean state instead of hiding it
-    if (selectionOverlay) {
-      // Clear all selection-specific UI elements but keep the overlay active
+    // Save the selection coordinates before hiding the overlay
+    const selectionCoordinates = {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
 
+    // Temporarily hide the overlay completely for clean screenshot capture
+    if (selectionOverlay) {
+      selectionOverlay.style.display = "none";
+    }
+
+    // Allow a brief moment for the UI to update before capturing
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Send the selection to the background script for processing
+    console.log("[DEBUG] Sending processSelection message");
+    const response = await chrome.runtime.sendMessage({
+      action: "processSelection",
+      rect: selectionCoordinates,
+      source: "content", // Add source to help with message routing
+      timestamp: new Date().toISOString(),
+    });
+
+    console.log("[DEBUG] processSelection response:", response);
+
+    // Now restore the overlay with a clean state (without the dim panels)
+    if (selectionOverlay) {
+      // Restore the overlay visibility but with a cleaner appearance
+      selectionOverlay.style.display = "block";
+
+      // Clear all selection-specific UI elements but keep the overlay active
       // Hide selection border
       const selectionBorder = selectionOverlay.querySelector(
         ".vision-cms-selection-border"
@@ -477,28 +506,9 @@ async function processSelection(rect: DOMRect): Promise<void> {
         (panel as HTMLElement).style.display = "none";
       });
 
-      // Ensure overlay remains visible with a light background to show it's still active
-      selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0.1)";
+      // Set completely transparent background
+      selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0)";
     }
-
-    // Allow a brief moment for the UI to update before capturing
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    // Send the selection to the background script for processing
-    console.log("[DEBUG] Sending processSelection message");
-    const response = await chrome.runtime.sendMessage({
-      action: "processSelection",
-      rect: {
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
-      },
-      source: "content", // Add source to help with message routing
-      timestamp: new Date().toISOString(),
-    });
-
-    console.log("[DEBUG] processSelection response:", response);
 
     // Reset startPoint but keep the overlay active
     startPoint = null;

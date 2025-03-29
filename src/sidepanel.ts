@@ -301,16 +301,23 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       if (typeof message.data === "string") {
         latestProcessedImageUrl = message.data;
 
-        // If we have an attached image in chat that's the full screenshot,
-        // update it to use the processed version instead
+        // If we have an attached image in chat and the chat preview is still open,
+        // update it to use the processed version
         if (
-          chatAttachedImage === latestImageUrl &&
-          latestProcessedImageUrl &&
-          chatImageThumbnail
+          chatAttachedImage &&
+          chatImageThumbnail &&
+          chatImagePreview?.style.display === "flex" &&
+          latestProcessedImageUrl
         ) {
           log("Updating chat thumbnail to use processed image");
           chatAttachedImage = latestProcessedImageUrl;
           chatImageThumbnail.src = latestProcessedImageUrl;
+          log(
+            `Updated chat thumbnail to processed image: ${latestProcessedImageUrl.substring(
+              0,
+              50
+            )}...`
+          );
         }
       }
       break;
@@ -535,6 +542,8 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
 
   // Store the latest image URL for potential chat attachment
   latestImageUrl = dataUrl;
+  // Reset processed URL since this is a new capture
+  latestProcessedImageUrl = null;
 
   // Check if we're on the chat tab (tab-4)
   const chatTab = document.getElementById("tab-4");
@@ -542,6 +551,7 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
 
   if (isChatTabActive) {
     // If we're on the chat tab, attach the image to the chat
+    // This will create a clean attachment with the new image
     attachImageToChat(dataUrl);
   } else {
     // Regular flow for analysis tab
@@ -563,17 +573,17 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
 function attachImageToChat(imageUrl: string): void {
   log("Attaching image to chat");
 
-  // Use the processed image if available, otherwise use the original
-  if (imageUrl === latestImageUrl && latestProcessedImageUrl) {
-    log("Using processed image for chat attachment");
-    chatAttachedImage = latestProcessedImageUrl;
-  } else {
-    chatAttachedImage = imageUrl;
-  }
+  // Clear any previous attached image first to avoid confusion
+  chatAttachedImage = null;
+
+  // Always use the image URL that was passed to this function
+  // This ensures we're always using the most recent selected image
+  chatAttachedImage = imageUrl;
 
   if (chatImagePreview && chatImageThumbnail && chatAttachedImage) {
     chatImageThumbnail.src = chatAttachedImage;
     chatImagePreview.style.display = "flex";
+    log(`Set chat thumbnail to image: ${chatAttachedImage.substring(0, 50)}...`);
   }
 }
 
@@ -910,14 +920,14 @@ function setupChat(): void {
     chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
     chatMessages = document.getElementById("chat-messages") as HTMLDivElement | null;
     chatSubmitButton = document.getElementById("chat-submit") as HTMLButtonElement | null;
-    chatImagePreview = document.getElementById(
-      "chat-image-preview"
+    chatImagePreview = document.querySelector(
+      ".chat-image-preview"
     ) as HTMLDivElement | null;
-    chatImageThumbnail = document.getElementById(
-      "chat-image-thumbnail"
+    chatImageThumbnail = document.querySelector(
+      ".chat-image-thumbnail"
     ) as HTMLImageElement | null;
-    chatImageRemoveButton = document.getElementById(
-      "chat-image-remove"
+    chatImageRemoveButton = document.querySelector(
+      ".chat-image-remove"
     ) as HTMLButtonElement | null;
 
     if (
@@ -1048,17 +1058,28 @@ function showThinkingIndicator(): void {
 
   isChatLoading = true;
 
-  const thinkingElement = document.createElement("div");
-  thinkingElement.className = "chat-thinking";
-  thinkingElement.id = "chat-thinking";
+  // Create a standard assistant message with loading class
+  const messageElement = document.createElement("div");
+  messageElement.className = "chat-message assistant loading";
+  messageElement.id = "chat-thinking"; // Keep the same ID for compatibility
 
+  const contentElement = document.createElement("div");
+  contentElement.className = "message-content";
+
+  // Add typing indicator with dots
+  const typingIndicator = document.createElement("div");
+  typingIndicator.className = "typing-indicator";
+
+  // Add three animated dots
   for (let i = 0; i < 3; i++) {
     const dot = document.createElement("div");
-    dot.className = "chat-thinking-dot";
-    thinkingElement.appendChild(dot);
+    dot.className = "typing-dot";
+    typingIndicator.appendChild(dot);
   }
 
-  chatMessages.appendChild(thinkingElement);
+  contentElement.appendChild(typingIndicator);
+  messageElement.appendChild(contentElement);
+  chatMessages.appendChild(messageElement);
   chatMessages.scrollTop = chatMessages.scrollHeight;
 
   if (chatSubmitButton) {

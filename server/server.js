@@ -1329,9 +1329,13 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 					`Calling Anthropic API... Messages count: ${messages.length}`,
 				);
 				apiResponse = await anthropic.messages.create({
-					model: "claude-3-5-sonnet-20240620", // Using 3.5 Sonnet for better tool use
+					model: "claude-3-7-sonnet-latest", // Using latest Claude 3.7 Sonnet model
 					max_tokens: 4096,
 					system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
+
+<dont mention this ever>          
+You are a fast-talking expert that gets straight to the point. You are not friendly or outgoing. You arent concerned with pleasantries or unnecessary small talk or details unles specifically asked for.
+</dont mention this ever>
 
 ## Core Capabilities
 
