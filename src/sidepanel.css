@@ -1,0 +1,195 @@
+/* --- History Tab Styles --- */
+#history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: calc(100vh - 150px); /* Adjust based on header/footer height */
+  overflow-y: auto;
+}
+
+.history-item {
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 5px;
+  background-color: var(--background-secondary);
+  transition: background-color 0.2s ease;
+}
+
+.history-item-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+  width: 100%; /* Ensure header takes full width */
+  box-sizing: border-box; /* Include padding in width calculation */
+}
+
+.history-item-header:hover {
+  background-color: var(--background-hover);
+}
+
+.history-thumbnail {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  margin-right: 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+}
+
+.history-item-text {
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  margin-right: 5px; /* Add some space before the indicator */
+}
+
+.history-timestamp {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.history-status {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.expand-indicator {
+  font-size: 12px;
+  margin-left: auto;
+  padding: 0 5px;
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+}
+
+.history-item.expanded .expand-indicator {
+  transform: rotate(90deg);
+}
+
+.history-item-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+  background-color: var(--background-primary);
+  border-top: 1px solid var(--border-color);
+}
+
+.history-item.expanded .history-item-content {
+  max-height: 500px; /* Adjust as needed, allows for content */
+  padding: 10px 15px;
+  transition: max-height 0.4s ease-in, padding 0.4s ease-in;
+}
+
+/* Style the container for the analysis buttons */
+.analysis-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px 0; /* Space below buttons */
+  display: flex; /* Arrange buttons horizontally */
+  flex-wrap: wrap; /* Allow buttons to wrap to next line */
+  gap: 6px; /* Spacing between buttons */
+}
+
+/* Style each analysis item as an outlined button */
+.analysis-list-item {
+  /* Reset potential list item styles */
+  display: inline-block; 
+  margin: 0;
+
+  /* Button appearance */
+  padding: 4px 10px; /* Compact padding */
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--border-radius, 4px); /* Use variable or default */
+  border: 1px solid var(--border-color); 
+  background-color: transparent; /* Outlined */
+  color: var(--text-secondary);
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+  white-space: nowrap; /* Keep content on one line initially */
+  max-width: 150px; /* Max width before truncating */
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Remove specific prompt label styling, apply truncation directly */
+.analysis-prompt-label {
+  /* No specific styles needed here anymore, applied to parent */
+}
+
+/* Hide timestamp from button view */
+.analysis-list-item .analysis-timestamp {
+  display: none; 
+}
+
+.analysis-list-item:hover {
+  background-color: var(--background-hover);
+  border-color: var(--text-secondary);
+  color: var(--text-primary);
+}
+
+.analysis-list-item.selected {
+  background-color: var(--primary-color-light);
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color-dark); 
+}
+
+.analysis-result-display {
+  /* Add margin-top to ensure space below buttons */
+  margin-top: 15px; 
+  padding: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background-color: var(--background-secondary);
+  font-size: 13px;
+  max-height: 300px; /* Limit height and make scrollable */
+  overflow-y: auto;
+}
+
+.analysis-result-display h1,
+.analysis-result-display h2,
+.analysis-result-display h3,
+.analysis-result-display h4 {
+  margin-top: 0.5em;
+  margin-bottom: 0.2em;
+  font-size: 1.1em; /* Adjust header sizes within results */
+}
+.analysis-result-display p {
+  margin-bottom: 0.5em;
+}
+.analysis-result-display ul,
+.analysis-result-display ol {
+ padding-left: 20px;
+ margin-bottom: 0.5em;
+}
+.analysis-result-display code {
+  background-color: var(--background-primary);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+.analysis-result-display pre {
+  background-color: var(--background-primary);
+  padding: 8px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.no-analysis-message {
+  font-style: italic;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 15px 10px; /* More vertical padding */
+  text-align: center;
+  margin: 0; /* Remove default paragraph margin */
+}
+
+/* Adjust Analysis Tab result display if needed */
+#analysis-results {
+  max-height: calc(100vh - 250px); /* Example height adjustment */
+  overflow-y: auto;
+}
+
+/* --- Settings Tab Styles (Placeholder) --- */
+#settings-content {
+  padding: 15px;
+} 

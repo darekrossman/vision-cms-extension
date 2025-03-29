@@ -38,17 +38,91 @@ const { log, error: logError } = createBackgroundLogger();
 // Log when the service worker starts
 log("Service worker started - v1.0");
 
-// Initialize extension on install
-chrome.runtime.onInstalled.addListener(() => {
-  log("Extension installed");
+// Add diagnostic logging for commands
+try {
+  if (chrome.commands && chrome.commands.getAll) {
+    chrome.commands.getAll((commands) => {
+      log(
+        "[Diagnostic] Initial commands registered by Chrome:",
+        JSON.stringify(commands, null, 2)
+      );
+      let foundReload = false;
+      let foundExecuteAction = false;
+      commands.forEach((command) => {
+        if (command.name === "reload") foundReload = true;
+        if (command.name === "_execute_action") foundExecuteAction = true;
+        if (command.name !== "_execute_action" && !command.shortcut) {
+          logError(
+            `[Diagnostic] Command "${command.name}" is missing its shortcut! Check chrome://extensions/shortcuts for conflicts.`
+          );
+        }
+      });
+      if (!foundReload)
+        logError("[Diagnostic] 'reload' command not found in getAll results.");
+      if (!foundExecuteAction)
+        logError("[Diagnostic] '_execute_action' command not found in getAll results.");
+    });
+  } else {
+    logError("[Diagnostic] chrome.commands.getAll API not available at startup.");
+  }
+} catch (e) {
+  logError("[Diagnostic] Error during initial command check:", e);
+}
+
+// Test service worker wake-up and initialization (Combined into the main listener below)
+// chrome.runtime.onInstalled.addListener(() => {
+//   console.log("Extension installed/reloaded! Service worker is alive.");
+// });
+
+// Initialize extension on install/update
+chrome.runtime.onInstalled.addListener(async (details) => {
+  log(`Extension ${details.reason}.`);
   chrome.storage.local.set({ isActive: true });
 
   // Set up the side panel to open on action click
-  chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((error) => logError("Error setting sidePanel behavior:", error));
+  try {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    log("Side panel behavior set to open on action click.");
+  } catch (error) {
+    logError("Error setting sidePanel behavior:", error);
+  }
 
   isActive = true;
+
+  // --- Remove automatic side panel opening attempt ---
+  // This cannot be done from onInstalled due to user gesture requirements
+  /* 
+  if (details.reason === "update") {
+    log("Detected extension update/reload, attempting to open side panel...");
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs.length > 0 && tabs[0].id) {
+        const activeTab = tabs[0];
+        if (!isRestrictedUrl(activeTab.url)) { 
+          await chrome.sidePanel.open({
+            tabId: activeTab.id,
+            windowId: activeTab.windowId,
+          });
+          log(
+            `Side panel opened automatically for tab ${activeTab.id} after update/reload.`
+          );
+        } else {
+          log(
+            `Skipped opening side panel automatically on restricted URL: ${activeTab.url}`
+          );
+        }
+      } else {
+        log("No active tab found to open side panel automatically.");
+      }
+    } catch (error) {
+      logError(
+        "Error trying to open side panel automatically after update/reload:",
+        error
+      );
+    }
+  }
+  */
+  // --- End removed section ---
 });
 
 // Initialize extension on browser startup
@@ -64,10 +138,37 @@ chrome.runtime.onStartup.addListener(() => {
   isActive = true;
 });
 
+// Helper function to check for restricted URLs
+function isRestrictedUrl(url: string | undefined): boolean {
+  if (!url) return false; // If no URL, assume it's okay (e.g., blank tab)
+  return (
+    url.startsWith("chrome://") ||
+    url.startsWith("chrome-extension://") ||
+    url.startsWith("devtools://") ||
+    url.startsWith("https://chrome.google.com/webstore")
+  ); // Also restrict webstore
+}
+
+const RESTRICTED_URL_ERROR = {
+  status: "error",
+  message:
+    "This feature cannot be used on Chrome's internal pages or the Chrome Web Store. Please navigate to a regular web page.",
+};
+
 // Handle extension icon clicks
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab || !tab.id) {
     logError("No valid tab for action click");
+    return;
+  }
+
+  // Add URL check here
+  if (isRestrictedUrl(tab.url)) {
+    logError("Action clicked on restricted URL:", tab.url);
+    // Optionally notify the user, maybe via a badge or brief popup (if one exists)
+    chrome.action.setBadgeText({ text: "X", tabId: tab.id });
+    chrome.action.setBadgeBackgroundColor({ color: "#FF0000", tabId: tab.id });
+    setTimeout(() => chrome.action.setBadgeText({ text: "", tabId: tab.id }), 3000);
     return;
   }
 
@@ -101,44 +202,64 @@ function handleStartSelection(tabId: number | undefined, sendResponse: Function)
 
   isActive = true;
 
-  // First make sure the content script is injected
-  ensureContentScriptsInjected(tabId)
-    .then(() => {
-      // After ensuring content script is injected, send the startSelection message
-      return chrome.tabs.sendMessage(tabId, {
-        action: "startSelection",
-        source: "background",
+  // Check if the tab is a chrome:// URL or other restricted URL
+  chrome.tabs.get(tabId, (tab) => {
+    if (isRestrictedUrl(tab.url)) {
+      logError("Cannot start selection on restricted URL:", tab.url);
+      sendResponse(RESTRICTED_URL_ERROR);
+      return;
+    }
+
+    // First make sure the content script is injected
+    ensureContentScriptsInjected(tabId)
+      .then(() => {
+        // After ensuring content script is injected, send the startSelection message
+        return chrome.tabs.sendMessage(tabId, {
+          action: "startSelection",
+          source: "background",
+        });
+      })
+      .then((response) => {
+        log("Content script acknowledged startSelection:", response);
+        sendResponse({ status: "ok" });
+      })
+      .catch((err) => {
+        logError("Error starting selection:", err);
+        sendResponse({
+          status: "error",
+          message: err.message.includes("chrome://")
+            ? "This feature cannot be used on Chrome's internal pages. Please navigate to a regular web page."
+            : err instanceof Error
+            ? err.message
+            : String(err),
+        });
       });
-    })
-    .then((response) => {
-      log("Content script acknowledged startSelection:", response);
-      sendResponse({ status: "ok" });
-    })
-    .catch((err) => {
-      logError("Error starting selection:", err);
-      sendResponse({
-        status: "error",
-        message: err instanceof Error ? err.message : String(err),
-      });
-    });
+  });
 }
 
 // Helper function to ensure content scripts are injected
 async function ensureContentScriptsInjected(tabId: number): Promise<void> {
   log("Ensuring content scripts are injected for tab:", tabId);
 
-  // First check if we can communicate with the content script
+  // First check if the tab is a restricted URL
   try {
-    // Try to ping the content script to see if it's loaded
-    const response = await chrome.tabs.sendMessage(tabId, { action: "ping" });
-    log("Content script already loaded in tab:", tabId, response);
-    return; // Content script is responsive, no need to inject
-  } catch (error) {
-    // Content script not loaded or not responsive, inject it
-    log("Content script not loaded or not responsive, injecting scripts...");
-  }
+    const tab = await chrome.tabs.get(tabId);
+    if (isRestrictedUrl(tab.url)) {
+      // Throw the specific error message for consistency
+      throw new Error(RESTRICTED_URL_ERROR.message);
+    }
 
-  try {
+    // First check if we can communicate with the content script
+    try {
+      // Try to ping the content script to see if it's loaded
+      const response = await chrome.tabs.sendMessage(tabId, { action: "ping" });
+      log("Content script already loaded in tab:", tabId, response);
+      return; // Content script is responsive, no need to inject
+    } catch (error) {
+      // Content script not loaded or not responsive, inject it
+      log("Content script not loaded or not responsive, injecting scripts...");
+    }
+
     // Inject the content script
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -172,9 +293,15 @@ async function ensureContentScriptsInjected(tabId: number): Promise<void> {
       );
       throw new Error("Content script injection succeeded but script is not responsive");
     }
-  } catch (error) {
+  } catch (error: any) {
+    // Specify type for error
     logError("Error injecting content scripts:", error);
-    throw error;
+    // Re-throw the original error message if it's the restricted URL error
+    if (error.message === RESTRICTED_URL_ERROR.message) {
+      throw error;
+    }
+    // Otherwise, throw a generic injection error
+    throw new Error(`Failed to prepare content script: ${error.message}`);
   }
 }
 
@@ -182,15 +309,19 @@ async function ensureContentScriptsInjected(tabId: number): Promise<void> {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const isFromContentScript = sender.tab?.id;
   const isFromSidePanel = message.source === "sidePanel";
+  const messageSource = isFromContentScript
+    ? `content script (tab ${sender.tab!.id})`
+    : isFromSidePanel
+    ? "side panel"
+    : message.source || "unknown source";
 
   log(
     "Message received:",
     message.action,
-    isFromContentScript
-      ? `from content script (tab ${sender.tab!.id})`
-      : isFromSidePanel
-      ? "from side panel"
-      : "from unknown source"
+    "from",
+    messageSource,
+    "details:",
+    JSON.stringify(message).substring(0, 200) // Log truncated message for debugging
   );
 
   switch (message.action) {
@@ -210,11 +341,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: "ok" });
       break;
 
+    case "processingStarted":
+      // Acknowledge the processing started notification
+      log("Processing started on tab", sender.tab?.id);
+      sendResponse({ status: "ok" });
+      break;
+
     case "startSelection":
       if (isFromSidePanel) {
         // When from side panel, get the current active tab
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           if (tabs.length > 0 && tabs[0].id) {
+            const tab = tabs[0];
+            // Check if the tab is a restricted URL
+            if (isRestrictedUrl(tab.url)) {
+              logError(
+                "Cannot start selection on restricted URL from side panel:",
+                tab.url
+              );
+              sendResponse(RESTRICTED_URL_ERROR);
+              return;
+            }
+
             log("Side panel requested selection, using active tab:", tabs[0].id);
             handleStartSelection(tabs[0].id, sendResponse);
           } else {
@@ -276,8 +424,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "processSelection":
-      handleProcessSelection(sender.tab?.id, message.rect, sendResponse);
-      return true; // Keep the message channel open for the async response
+      log("Processing selection request received:", JSON.stringify(message));
+      if (!message.rect || typeof message.rect !== "object") {
+        log("Invalid selection rectangle", message.rect);
+        sendResponse({ status: "error", error: "Invalid selection rectangle" });
+      } else {
+        handleProcessSelection(sender.tab?.id, message.rect, sendResponse);
+        return true; // Keep the message channel open for the async response
+      }
+      break;
 
     case "sidePanelOpened":
       log("Side panel opened");
@@ -289,8 +444,70 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleAnalyzeImage(message.imageUrl, sendResponse, message.customPrompt);
       return true;
 
+    case "toggleSelectionMode":
+      if (isFromSidePanel && typeof message.active === "boolean") {
+        // Request from sidepanel to toggle selection
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0 && tabs[0].id) {
+            const tabId = tabs[0].id;
+            const tab = tabs[0];
+            // Check if the tab is a restricted URL *before* trying to inject/message
+            if (isRestrictedUrl(tab.url)) {
+              logError("Cannot toggle selection mode on restricted URL:", tab.url);
+              sendResponse(RESTRICTED_URL_ERROR);
+              return;
+            }
+
+            log(
+              `${
+                message.active ? "Starting" : "Implicitly cancelling (new toggle off)"
+              } selection on tab: ${tabId}`
+            );
+
+            // Ensure content script is injected before sending message
+            ensureContentScriptsInjected(tabId)
+              .then(() => {
+                // Send start or implicit cancel (by not sending start) to content script
+                if (message.active) {
+                  return chrome.tabs.sendMessage(tabId, { action: "startSelection" });
+                } else {
+                  // If toggling off, we might implicitly cancel, or rely on explicit cancelSelection
+                  // For robustness, we can send cancel, but the content script should handle no-op if not active
+                  return chrome.tabs.sendMessage(tabId, { action: "cancelSelection" });
+                }
+              })
+              .then(() => {
+                log("Sent selection mode message to content script");
+                sendResponse({ status: "ok", mode: message.active });
+              })
+              .catch((err) => {
+                logError("Error sending selection message to content script:", err);
+                // Check if the error is due to the restricted URL
+                if (err.message === RESTRICTED_URL_ERROR.message) {
+                  sendResponse(RESTRICTED_URL_ERROR);
+                } else {
+                  sendResponse({
+                    status: "error",
+                    message: err.message, // Use the caught error message
+                  });
+                }
+              });
+          } else {
+            logError("No active tab found for selection toggle");
+            sendResponse({ status: "error", message: "No active tab found" });
+          }
+        });
+        return true; // Keep response channel open for async operations
+      } else {
+        logError("Invalid toggleSelectionMode message received", message);
+        sendResponse({ status: "error", message: "Invalid message format" });
+      }
+      break;
+
     default:
-      log("Unknown message action:", message.action);
+      // Enhanced logging for unknown actions
+      log("Unknown message action:", message.action, "from", messageSource);
+      log("Full message details:", JSON.stringify(message));
       sendResponse({ status: "error", message: "Unknown action" });
   }
 
@@ -456,10 +673,10 @@ async function handleAnalyzeImage(
     log("Analysis completed successfully");
 
     // Notify the side panel of the successful analysis
+    log("Sending analysis result to sidepanel");
     chrome.runtime.sendMessage({
-      action: "analysisDone",
-      analysis: analysisContent,
-      timestamp: new Date().toISOString(),
+      action: "analysisComplete",
+      resultHtml: analysisContent,
     });
 
     sendResponse({ status: "ok", analysis: analysisContent });
@@ -470,7 +687,7 @@ async function handleAnalyzeImage(
     // Notify the side panel of the error
     chrome.runtime.sendMessage({
       action: "analysisError",
-      message: errorMessage,
+      error: errorMessage,
     });
 
     sendResponse({ status: "error", message: errorMessage });
@@ -508,4 +725,57 @@ function keepAlive(): void {
     const timestamp = new Date().toISOString();
     log(`Service worker alive check: ${timestamp}`);
   }, 25000); // Every 25 seconds
+}
+
+// --- Command Listener ---
+try {
+  if (chrome.commands && chrome.commands.onCommand) {
+    chrome.commands.onCommand.addListener((command) => {
+      log(`Command received: ${command}`);
+      if (command === "reload") {
+        log("Reloading extension via command.");
+        chrome.runtime.reload();
+      }
+      // Handle other commands if added later
+    });
+    log("[Diagnostic] chrome.commands.onCommand listener attached successfully.");
+  } else {
+    logError(
+      "[Diagnostic] chrome.commands or onCommand API not available at listener attachment time."
+    );
+  }
+} catch (error) {
+  logError("[Diagnostic] Error initializing commands listener:", error);
+}
+
+// --- Basic Test Listeners ---
+// These are to test if the service worker can wake up for various events
+
+// Listen for browser startup (service worker will start if browser starts)
+chrome.runtime.onStartup.addListener(() => {
+  console.log("WAKE UP TEST: Browser started.");
+});
+
+// Listen for tab updates
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  console.log("WAKE UP TEST: Tab updated", tabId);
+});
+
+// Create a simple alarm that fires one time in 5 seconds after load
+try {
+  if (chrome.alarms) {
+    chrome.alarms.create("wakeupTest", {
+      delayInMinutes: 0.1, // 6 seconds
+    });
+
+    // Listen for the alarm
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      console.log("WAKE UP TEST: Alarm triggered:", alarm.name);
+    });
+    log("Alarms API initialized successfully");
+  } else {
+    log("chrome.alarms API not available");
+  }
+} catch (error) {
+  logError("Error initializing alarms:", error);
 }

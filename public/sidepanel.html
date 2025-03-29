@@ -34,10 +34,11 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 16px 20px;
+      padding: 12px 20px;
       border-bottom: 1px solid var(--border-color);
       background-color: var(--surface-color);
       box-shadow: var(--shadow-sm);
+      position: relative;
     }
     
     .title {
@@ -113,7 +114,6 @@
       border-radius: var(--border-radius);
       overflow: hidden;
       background-color: var(--surface-color);
-      height: 240px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -381,52 +381,191 @@
         opacity: 1;
       }
     }
+    
+    .tabs {
+      display: flex;
+      background-color: var(--surface-color);
+      border-bottom: 1px solid var(--border-color);
+      box-shadow: var(--shadow-sm);
+    }
+    
+    .tab-button {
+      padding: 12px 16px;
+      background-color: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      flex: 1;
+      transition: all 0.2s ease;
+      text-align: center;
+    }
+    
+    .tab-button:hover {
+      color: var(--text-primary);
+      background-color: rgba(0, 0, 0, 0.04);
+    }
+    
+    .tab-button.active {
+      color: var(--primary-color);
+      border-bottom: 2px solid var(--primary-color);
+      background-color: var(--surface-color);
+    }
+    
+    .tab-content {
+      display: none;
+      height: calc(100vh - 124px);
+      overflow-y: auto;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+    
+    .history-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    
+    .history-item {
+      display: flex;
+      align-items: center;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border-color);
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+    }
+    
+    .history-item:hover {
+      background-color: rgba(0, 0, 0, 0.02);
+    }
+    
+    .history-thumbnail {
+      width: 60px;
+      height: 40px;
+      object-fit: cover;
+      border-radius: 4px;
+      margin-right: 16px;
+      border: 1px solid var(--border-color);
+      background-color: #eee;
+    }
+    
+    .history-timestamp {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* Specific styling for the header button */
+    .header .icon-button {
+      width: auto;
+      padding: 6px;
+      margin: 0;
+      border: none;
+      background: none;
+      box-shadow: none;
+      color: var(--text-secondary);
+    }
+
+    .header .icon-button:hover {
+      background-color: rgba(0, 0, 0, 0.04);
+      color: var(--text-primary);
+      box-shadow: none;
+    }
+
+    .header .icon-button.active {
+      background-color: rgba(26, 115, 232, 0.1);
+      color: var(--primary-color);
+      border-color: transparent;
+    }
+    
+    .header .icon-button svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    .header .icon-button .select-icon {
+      display: inline;
+    }
+
+    .header .icon-button .cancel-icon {
+      display: none;
+    }
+
+    .header .icon-button.active .select-icon {
+      display: none;
+    }
+
+    .header .icon-button.active .cancel-icon {
+      display: inline;
+    }
   </style>
 </head>
 <body>
   <div class="header">
     <h2 class="title">Vision CMS</h2>
+    <button id="selection-toggle" class="icon-button" title="Capture Area">
+      <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+        <circle cx="12" cy="13" r="4"></circle>
+      </svg>
+      <svg class="cancel-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+         <line x1="18" y1="6" x2="6" y2="18"></line>
+         <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
   </div>
   
-  <div class="content">
-    <button id="selection-toggle" class="icon-button" title="Toggle selection mode">
-      <svg class="select-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M3 3h18v18H3z"></path>
-        <path d="M8 8v8h8V8H8z"></path>
-      </svg>
-      <svg class="cancel-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"></circle>
-        <line x1="15" y1="9" x2="9" y2="15"></line>
-        <line x1="9" y1="9" x2="15" y2="15"></line>
-      </svg>
-      <span class="button-text">Select Area</span>
-    </button>
-    
-    <div id="image-preview" class="image-preview" style="display: none;">
-      <div id="loading-spinner" class="loading-spinner"></div>
-    </div>
-    
-    <div id="prompt-section" class="prompt-section">
-      <h3>Choose an analysis prompt:</h3>
-      <div class="prompt-buttons">
-        <button class="prompt-button" data-prompt-id="describe">Describe content and extract text</button>
-        <button class="prompt-button" data-prompt-id="extract-text">Extract text only</button>
-        <button class="prompt-button" data-prompt-id="analyze-ui">Analyze UI design</button>
-        <button class="prompt-button" data-prompt-id="identify-content">Identify page structure</button>
-        <button class="prompt-button" data-prompt-id="seo-analysis">SEO analysis</button>
-        <button class="prompt-button" data-prompt-id="content-type-json">Create content type json</button>
+  <div class="tabs">
+    <button id="tab-1" class="tab-button active" data-tab="content-tab-1">Analysis</button>
+    <button id="tab-2" class="tab-button" data-tab="content-tab-2">History</button>
+    <button id="tab-3" class="tab-button" data-tab="content-tab-3">Settings</button>
+  </div>
+  
+  <div id="content-tab-1" class="tab-content active">
+    <div class="content">
+      <div id="image-preview" class="image-preview" style="display: none;">
+        <div id="loading-spinner" class="loading-spinner"></div>
       </div>
-      <div id="chat-loader" class="chat-loader">
-        <div class="chat-loader-dots">
-          <div class="chat-loader-dot"></div>
-          <div class="chat-loader-dot"></div>
-          <div class="chat-loader-dot"></div>
+      
+      <div id="prompt-section" class="prompt-section">
+        <h3>Choose an analysis prompt:</h3>
+        <div class="prompt-buttons">
+          <button class="prompt-button" data-prompt-id="describe">Describe content and extract text</button>
+          <button class="prompt-button" data-prompt-id="extract-text">Extract text only</button>
+          <button class="prompt-button" data-prompt-id="analyze-ui">Analyze UI design</button>
+          <button class="prompt-button" data-prompt-id="identify-content">Identify page structure</button>
+          <button class="prompt-button" data-prompt-id="seo-analysis">SEO analysis</button>
+          <button class="prompt-button" data-prompt-id="content-type-json">Create content type json</button>
         </div>
-        <div class="chat-loader-text">Analyzing content...</div>
+        <div id="chat-loader" class="chat-loader">
+          <div class="chat-loader-dots">
+            <div class="chat-loader-dot"></div>
+            <div class="chat-loader-dot"></div>
+            <div class="chat-loader-dot"></div>
+          </div>
+          <div class="chat-loader-text">Analyzing content...</div>
+        </div>
       </div>
+      
+      <div id="analysis-results" class="analysis-results"></div>
     </div>
-    
-    <div id="analysis-results" class="analysis-results"></div>
+  </div>
+  
+  <div id="content-tab-2" class="tab-content">
+    <ul id="history-list" class="history-list">
+      <!-- History items will be added here by JavaScript -->
+      <li style="padding: 20px; text-align: center; color: var(--text-secondary);">No captures yet.</li>
+    </ul>
+  </div>
+  
+  <div id="content-tab-3" class="tab-content">
+    <div class="content">
+      <h3>Settings</h3>
+      <p>Settings content will be added here.</p>
+    </div>
   </div>
 
   <!-- Load scripts -->

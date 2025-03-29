@@ -1,0 +1,1009 @@
+// Import logger utility first to ensure it's available immediately
+import {
+	STORAGE_KEYS
+	StoredImage
+	createSidePanelLoggerr,
+	deleteImageFromStorage,
+	getImagesFromStorageomStorage,
+	saveImageToStoragetorage,
+} from "./utils";
+
+/**
+ * Vision CMS Side Panel Script
+ * Handles UI interactions and communication with the background service worker
+ */
+
+// Set up logging immediately
+const { log, error: logError } = createSidePanelLogger();
+
+// Log that the script is starting
+log("Sidepanel script starting");
+
+// We'll import marked lazily when needed
+let markedModule: any = null;
+
+// Configuration and state
+let isSelectionModeActive = false;
+let currentTab: chrome.tabs.Tab | null = null;
+let selectedPromptId: string | null = null;
+
+// Track if capture is in progress
+let captureInProgress = false;
+let analysisInProgress = false;
+
+// Store the latest image URL and selected gallery image
+let latestImageUrl: string | null = null;
+let selectedGalleryImageId: string | null = null;
+
+// Tab state
+let currentTabId = "analyze-tab";
+
+// DOM elements (we'll populate these after DOM load)
+const startButton: HTMLButtonElement | null = null;
+const processButton: HTMLButtonElement | null = null;
+const imageContainer: HTMLDivElement | null = null;
+const loadingIndicator: HTMLDivElement | null = null;
+let tabButtons: NodeListOf<HTMLButtonElement> | null = null;
+let tabContents: NodeListOf<HTMLDivElement> | null = null;
+let galleryContainer: HTMLDivElement | null = null;
+let analyzeSelectedButton: HTMLButtonElement | null = null;
+
+// Initialize when the document is loaded
+document.addEventListener("DOMContentLoaded", () => {
+	log("DOMContentLoaded fired - Initializing side panel UI");
+
+	try {
+		// Import marked library after DOM is ready
+		import("marked")
+			.then((module) => {
+				markedModule = module;
+				try {
+					markedModule.marked.setOptions({
+						gfm: true,
+						breaks: true,
+					});
+					log("Markdown parser imported and configured successfully");
+				} catch (error: any) {
+					logError("Error configuring markdown parser:", error);
+					// Continue execution even if markdown parser fails
+				}
+			})
+			.catch((error: any) => {
+				logError("Failed to import markdown parser:", error);
+				// Continue without markdown support
+			});
+
+		// Get the active tab information
+		chrome.tabs
+			.query({ active: true, currentWindow: true })
+			.then((tabs) => {
+				if (tabs.length > 0) {
+					currentTab = tabs[0];
+					log("Connected to active tab:", currentTab.id, currentTab.url);
+				} else {
+					logError("No active tab found");
+				}
+			})
+			.catch((err) => {
+				logError("Failed to get active tab", err);
+			});
+
+		// Get reference to all tab buttons and content
+		tabButtons = document.querySelectorAll(".tab-button");
+		tabContents = document.querySelectorAll(".tab-content");
+
+		// Get reference to toggle button and prompt section
+		const selectionToggle = document.getElementById(
+			"selection-toggle",
+		) as HTMLButtonElement | null;
+		log("Found selection-toggle element:", !!selectionToggle);
+
+		const imagePreview = document.getElementById(
+			"image-preview",
+		) as HTMLDivElement | null;
+		log("Found image-preview element:", !!imagePreview);
+
+		const promptSection = document.getElementById(
+			"prompt-section",
+		) as HTMLDivElement | null;
+		log("Found prompt-section element:", !!promptSection);
+
+		galleryContainer = document.getElementById(
+			"gallery-container",
+		) as HTMLDivElement | null;
+		log("Found gallery-container element:", !!galleryContainer);
+
+		analyzeSelectedButton = document.getElementById(
+			"analyze-selected",
+		) as HTMLButtonElement | null;
+		log("Found analyze-selected button:", !!analyzeSelectedButton);
+
+		// Validate UI elements
+		if (
+			!selectionToggle ||
+			!imagePreview ||
+			!promptSection ||
+			!galleryContainer ||
+			!analyzeSelectedButton
+		) {
+			logError("Required UI elements not found in DOM");
+			return;
+		}
+
+		log("All required UI elements loaded successfully");
+
+		// Set up tab button event listeners
+		setupTabNavigation();
+
+		// Set up toggle button event listener
+		log("Adding click event listener to selection toggle button");
+		selectionToggle.addEventListener("click", async (event) => {
+			try {
+				log("Selection toggle button clicked", event);
+
+				// Get current state before toggling
+				const wasActive = isSelectionModeActive;
+
+				// Toggle selection mode state
+				isSelectionModeActive = !wasActive;
+
+				log(
+					`Selection mode ${
+						isSelectionModeActive ? "activated" : "deactivated"
+					}`,
+				);
+
+				try {
+					// Update UI immediately to provide visual feedback
+					updateSelectionToggleState(isSelectionModeActive, selectionToggle);
+					log("Updated selection toggle UI state");
+
+					if (isSelectionModeActive) {
+						// Start selection mode
+						log("Sending startSelection message to background script");
+						const response = await chrome.runtime.sendMessage({
+							action: "startSelection",
+							source: "sidePanel",
+						});
+
+						log(
+							"Background service worker response for startSelection:",
+							response,
+						);
+
+						if (response && response.status === "error") {
+							// If there's an error, revert the selection state
+							isSelectionModeActive = false;
+							updateSelectionToggleState(false, selectionToggle);
+							logError("Error starting selection:", response.message);
+						}
+					} else {
+						// Cancel selection mode
+						log("Sending cancelSelection message to background script");
+						const response = await chrome.runtime.sendMessage({
+							action: "cancelSelection",
+							source: "sidePanel",
+						});
+
+						log(
+							"Background service worker response for cancelSelection:",
+							response,
+						);
+
+						if (response && response.status === "error") {
+							logError("Error cancelling selection:", response.message);
+						}
+					}
+				} catch (error) {
+					logError(
+						`Failed to ${
+							isSelectionModeActive ? "start" : "cancel"
+						} selection mode`,
+						error,
+					);
+
+					// Revert the toggle state on error
+					isSelectionModeActive = wasActive;
+					updateSelectionToggleState(wasActive, selectionToggle);
+				}
+			} catch (outerError) {
+				logError(
+					"Unexpected error in selection toggle event handler:",
+					outerError,
+				);
+				// Try to reset the UI state
+				try {
+					isSelectionModeActive = false;
+					updateSelectionToggleState(false, selectionToggle);
+				} catch (resetError) {
+					logError("Failed to reset UI after error:", resetError);
+				}
+			}
+		});
+
+		// Set up prompt button event listeners
+		const promptButtons = document.querySelectorAll(".prompt-button");
+		promptButtons.forEach((button) => {
+			button.addEventListener("click", async () => {
+				if (!latestImageUrl || analysisInProgress) {
+					return;
+				}
+
+				try {
+					const promptId =
+						(button as HTMLElement).dataset.promptId || "describe";
+					selectedPromptId = promptId;
+
+					// Hide prompt buttons and show the loader
+					const promptButtons = document.querySelector(
+						".prompt-buttons",
+					) as HTMLDivElement | null;
+					const chatLoader = document.getElementById(
+						"chat-loader",
+					) as HTMLDivElement | null;
+
+					if (promptButtons && chatLoader) {
+						promptButtons.style.display = "none";
+						chatLoader.style.display = "block";
+					}
+
+					analysisInProgress = true;
+
+					// Send the image for analysis with the selected prompt
+					const response = await chrome.runtime.sendMessage({
+						action: "analyzeImage",
+						imageUrl: latestImageUrl,
+						promptId: selectedPromptId,
+					});
+
+					log("Analysis response:", response);
+
+					// Process the analysis response
+					if (response && response.status === "success") {
+						displayAnalysis(response.analysis);
+					} else {
+						handleAnalysisError(
+							response?.message || "Failed to analyze image. Please try again.",
+						);
+					}
+				} catch (error: any) {
+					logError("Error during image analysis:", error);
+					handleAnalysisError(error.message || "An unexpected error occurred");
+				} finally {
+					analysisInProgress = false;
+				}
+			});
+		});
+
+		// Set up "Analyze Selected" button for gallery
+		if (analyzeSelectedButton) {
+			analyzeSelectedButton.addEventListener("click", async () => {
+				if (!selectedGalleryImageId) {
+					return;
+				}
+
+				try {
+					// Switch to analyze tab
+					switchTab("analyze-tab");
+
+					// Get the selected image data
+					const images = await getImagesFromStorage();
+					const selectedImage = images.find(
+						(img: StoredImage) => img.id === selectedGalleryImageId,
+					);
+
+					if (selectedImage) {
+						// Display the selected image in the analyze tab
+						latestImageUrl = selectedImage.dataUrl;
+						displayImage(selectedImage.dataUrl);
+						showPromptSection();
+					}
+				} catch (error: any) {
+					logError("Error loading selected image:", error);
+				}
+			});
+		}
+
+		// Load gallery images
+		loadGalleryImages();
+
+		// Set up message listener for runtime messages
+		setupMessageListener();
+
+		// Notify background worker that sidepanel is ready
+		notifyBackgroundReady();
+
+		log("Side panel initialization complete");
+	} catch (error: any) {
+		logError("Error during sidepanel initialization:", error);
+	}
+});
+
+// Function to handle tab switching
+function setupTabNavigation(): void {
+	const tabButtons = document.querySelectorAll(".tab-button");
+
+	tabButtons.forEach((button) => {
+		button.addEventListener("click", () => {
+			const tabId = button.getAttribute("data-tab");
+			if (tabId) {
+				switchTab(tabId);
+			}
+		});
+	});
+}
+
+// Function to switch between tabs
+function switchTab(tabId: string): void {
+	// Save current tab ID
+	currentTabId = tabId;
+
+	// Update tab buttons active state
+	const tabButtons = document.querySelectorAll(".tab-button");
+	tabButtons.forEach((button) => {
+		if (button.getAttribute("data-tab") === tabId) {
+			button.classList.add("active");
+		} else {
+			button.classList.remove("active");
+		}
+	});
+
+	// Show selected tab content, hide others
+	const tabContents = document.querySelectorAll(".tab-content");
+	tabContents.forEach((content) => {
+		if (content.id === tabId) {
+			content.classList.add("active");
+		} else {
+			content.classList.remove("active");
+		}
+	});
+
+	// If switching to gallery tab, refresh gallery
+	if (tabId === "gallery-tab") {
+		loadGalleryImages();
+	}
+}
+
+// Function to load gallery images from storage
+async function loadGalleryImages(): Promise<void> {
+	if (!galleryContainer) return;
+
+	try {
+		// Clear existing gallery items
+		galleryContainer.innerHTML = "";
+
+		// Get images from storage
+		const images = await getImagesFromStorage();
+
+		// Update empty message visibility
+		const emptyMessage = document.getElementById("gallery-empty-message");
+		if (emptyMessage) {
+			emptyMessage.style.display = images.length === 0 ? "block" : "none";
+		}
+
+		// Hide analyze button if no images are selected
+		if (analyzeSelectedButton) {
+			analyzeSelectedButton.style.display = "none";
+		}
+
+		// Create gallery thumbnails
+		images.forEach((image: StoredImage) => {
+			const thumbnailElement = document.createElement("div");
+			thumbnailElement.className = "gallery-thumbnail";
+			(thumbnailElement as HTMLElement).dataset.imageId = image.id;
+
+			if (image.id === selectedGalleryImageId) {
+				thumbnailElement.classList.add("selected");
+				if (analyzeSelectedButton) {
+					analyzeSelectedButton.style.display = "block";
+				}
+			}
+
+			const img = document.createElement("img");
+			img.src = image.dataUrl;
+			img.alt = image.name;
+
+			thumbnailElement.appendChild(img);
+			if (galleryContainer) {
+				galleryContainer.appendChild(thumbnailElement);
+			}
+
+			// Add click event to select/deselect
+			thumbnailElement.addEventListener("click", () => {
+				handleGalleryItemClick(image.id);
+			});
+		});
+	} catch (error: any) {
+		logError("Error loading gallery images:", error);
+	}
+}
+
+// Function to handle gallery thumbnail clicks
+function handleGalleryItemClick(imageId: string): void {
+	if (!galleryContainer || !analyzeSelectedButton) return;
+
+	// If clicking the already selected item, deselect it
+	if (selectedGalleryImageId === imageId) {
+		selectedGalleryImageId = null;
+		analyzeSelectedButton.style.display = "none";
+
+		// Update UI to show deselected
+		const selectedItems = galleryContainer.querySelectorAll(
+			".gallery-thumbnail.selected",
+		);
+		selectedItems.forEach((item) => item.classList.remove("selected"));
+
+		return;
+	}
+
+	// Otherwise, select the clicked item and deselect others
+	selectedGalleryImageId = imageId;
+	analyzeSelectedButton.style.display = "block";
+
+	// Update UI
+	const allThumbnails = galleryContainer.querySelectorAll(".gallery-thumbnail");
+	allThumbnails.forEach((thumbnail) => {
+		if ((thumbnail as HTMLElement).dataset.imageId === imageId) {
+			thumbnail.classList.add("selected");
+		} else {
+			thumbnail.classList.remove("selected");
+		}
+	});
+}
+
+function resetUI(): void {
+	try {
+		log("Resetting UI elements");
+
+		// Reset selection mode
+		isSelectionModeActive = false;
+		const selectionToggle = document.getElementById(
+			"selection-toggle",
+		) as HTMLButtonElement | null;
+		if (selectionToggle) {
+			updateSelectionToggleState(false, selectionToggle);
+		}
+
+		// Reset image preview
+		const imagePreview = document.getElementById(
+			"image-preview",
+		) as HTMLDivElement | null;
+		if (imagePreview) {
+			// Clear any existing images
+			const existingImage = imagePreview.querySelector("img");
+			if (existingImage) {
+				imagePreview.removeChild(existingImage);
+			}
+			imagePreview.style.display = "block";
+		}
+
+		// Reset loading spinner
+		const loadingSpinner = document.getElementById(
+			"loading-spinner",
+		) as HTMLDivElement | null;
+		if (loadingSpinner) {
+			loadingSpinner.style.display = "none";
+		}
+
+		// Reset prompt section
+		const promptSection = document.getElementById(
+			"prompt-section",
+		) as HTMLDivElement | null;
+		if (promptSection) {
+			promptSection.style.display = "none";
+		}
+
+		// Reset prompt buttons and loader
+		const promptButtons = document.querySelector(
+			".prompt-buttons",
+		) as HTMLDivElement | null;
+		if (promptButtons) {
+			promptButtons.style.display = "block";
+		}
+
+		const chatLoader = document.getElementById(
+			"chat-loader",
+		) as HTMLDivElement | null;
+		if (chatLoader) {
+			chatLoader.style.display = "none";
+		}
+
+		// Reset analysis results
+		const analysisResults = document.getElementById(
+			"analysis-results",
+		) as HTMLDivElement | null;
+		if (analysisResults) {
+			analysisResults.innerHTML = "";
+			analysisResults.style.display = "none";
+		}
+
+		// Reset state variables
+		latestImageUrl = null;
+		selectedPromptId = null;
+		captureInProgress = false;
+		analysisInProgress = false;
+
+		log("UI reset complete");
+	} catch (error: any) {
+		logError("Error resetting UI:", error);
+	}
+}
+
+function setupMessageListener(): void {
+	log("Setting up runtime message listener");
+
+	try {
+		chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+			log("Received message:", message);
+
+			// Only process messages from the extension itself or trusted sources
+			if (sender.id !== chrome.runtime.id) {
+				logError("Received message from untrusted source:", sender);
+				return;
+			}
+
+			switch (message.action) {
+				case "selectionCancelled":
+					handleSelectionCancelled();
+					break;
+
+				case "screenshotCaptured":
+					handleScreenshotCaptured(message.dataUrl);
+					break;
+
+				case "serviceWorkerReady":
+					// Background service worker is initialized and ready
+					log("Background service worker is ready");
+					break;
+
+				default:
+					log("Unhandled message action:", message.action);
+			}
+		});
+
+		log("Message listener setup complete");
+	} catch (error: any) {
+		logError("Error setting up message listener:", error);
+	}
+}
+
+function notifyBackgroundReady(): void {
+	log("Notifying background worker that sidepanel is ready");
+
+	try {
+		chrome.runtime
+			.sendMessage({
+				action: "sidepanelReady",
+			})
+			.catch((error) => {
+				logError("Error sending sidepanelReady message:", error);
+			});
+	} catch (error: any) {
+		logError("Failed to notify background worker:", error);
+	}
+}
+
+function handleSelectionCancelled(): void {
+	log("Selection was cancelled");
+
+	try {
+		isSelectionModeActive = false;
+		const selectionToggle = document.getElementById(
+			"selection-toggle",
+		) as HTMLButtonElement | null;
+		if (selectionToggle) {
+			updateSelectionToggleState(false, selectionToggle);
+		}
+	} catch (error: any) {
+		logError("Error handling selection cancelled:", error);
+	}
+}
+
+function handleScreenshotCaptured(dataUrl: string): void {
+	log("Screenshot captured");
+
+	try {
+		captureInProgress = false;
+		latestImageUrl = dataUrl;
+
+		// Display the captured image
+		displayImage(dataUrl);
+
+		// Save the image to storage for gallery
+		saveImageToStorage(dataUrl)
+			.then(() => {
+				// Show prompt section for analysis
+				showPromptSection();
+			})
+			.catch((error: any) => {
+				logError("Error saving image to storage:", error);
+			});
+	} catch (error: any) {
+		logError("Error handling screenshot capture:", error);
+	}
+}
+
+function showPromptSection(): void {
+	log("Showing prompt section");
+
+	try {
+		const promptSection = document.getElementById("prompt-section");
+		if (promptSection) {
+			promptSection.style.display = "block";
+		}
+
+		updateUILayout();
+	} catch (error: any) {
+		logError("Error showing prompt section:", error);
+	}
+}
+
+function updateUILayout(): void {
+	log("Updating UI layout");
+
+	try {
+		// Any layout adjustments needed after content changes
+	} catch (error: any) {
+		logError("Error updating UI layout:", error);
+	}
+}
+
+function displayImage(imageUrl: string): void {
+	log("Displaying image in preview");
+
+	try {
+		// Reset selection state first
+		isSelectionModeActive = false;
+		const selectionToggle = document.getElementById(
+			"selection-toggle",
+		) as HTMLButtonElement | null;
+		if (selectionToggle) {
+			updateSelectionToggleState(false, selectionToggle);
+		}
+
+		// Get image preview container
+		const imagePreview = document.getElementById(
+			"image-preview",
+		) as HTMLDivElement | null;
+		if (!imagePreview) {
+			logError("Image preview element not found");
+			return;
+		}
+
+		// Clear loading spinner
+		const loadingSpinner = document.getElementById(
+			"loading-spinner",
+		) as HTMLDivElement | null;
+		if (loadingSpinner) {
+			loadingSpinner.style.display = "none";
+		}
+
+		// Remove any existing image
+		const existingImage = imagePreview.querySelector("img");
+		if (existingImage) {
+			imagePreview.removeChild(existingImage);
+		}
+
+		// Create and add new image
+		const img = document.createElement("img");
+		img.src = imageUrl;
+		img.alt = "Captured screenshot";
+		img.style.maxWidth = "100%";
+		img.style.maxHeight = "100%";
+		img.style.objectFit = "contain";
+
+		imagePreview.appendChild(img);
+		imagePreview.style.display = "flex"; // Make sure it's visible
+
+		// Hide analysis results if they were previously showing
+		const analysisResults = document.getElementById(
+			"analysis-results",
+		) as HTMLDivElement | null;
+		if (analysisResults) {
+			analysisResults.style.display = "none";
+		}
+
+		log("Image displayed successfully");
+	} catch (error: any) {
+		logError("Error displaying image:", error);
+	}
+}
+
+function updateSelectionToggleState(
+	active: boolean,
+	toggleButton: HTMLButtonElement,
+): void {
+	log(`Updating selection toggle state: ${active ? "active" : "inactive"}`);
+
+	try {
+		if (active) {
+			toggleButton.classList.add("active");
+			// You might want to change the text to indicate cancellation is possible
+			const textSpan = toggleButton.querySelector("span");
+			if (textSpan) {
+				textSpan.textContent = "Cancel Selection";
+			}
+		} else {
+			toggleButton.classList.remove("active");
+			const textSpan = toggleButton.querySelector("span");
+			if (textSpan) {
+				textSpan.textContent = "Select Element";
+			}
+		}
+	} catch (error: any) {
+		logError("Error updating selection toggle state:", error);
+	}
+}
+
+function handleProcessingStarted(): void {
+	log("Processing started");
+
+	try {
+		// Show loading spinner
+		const loadingSpinner = document.getElementById(
+			"loading-spinner",
+		) as HTMLDivElement | null;
+		if (loadingSpinner) {
+			loadingSpinner.style.display = "block";
+		}
+
+		// Disable selection toggle during processing
+		const selectionToggle = document.getElementById(
+			"selection-toggle",
+		) as HTMLButtonElement | null;
+		if (selectionToggle) {
+			selectionToggle.disabled = true;
+		}
+	} catch (error: any) {
+		logError("Error handling processing started:", error);
+	}
+}
+
+function displayAnalysis(analysis: string): void {
+	log("Displaying analysis results");
+
+	try {
+		// Hide the prompt section
+		const promptSection = document.getElementById(
+			"prompt-section",
+		) as HTMLDivElement | null;
+		if (promptSection) {
+			promptSection.style.display = "none";
+		}
+
+		// Reset the chat loader and show prompt buttons again for future use
+		const chatLoader = document.getElementById(
+			"chat-loader",
+		) as HTMLDivElement | null;
+		if (chatLoader) {
+			chatLoader.style.display = "none";
+		}
+
+		const promptButtons = document.querySelector(
+			".prompt-buttons",
+		) as HTMLDivElement | null;
+		if (promptButtons) {
+			promptButtons.style.display = "block";
+		}
+
+		// Get the analysis results container
+		const analysisResults = document.getElementById(
+			"analysis-results",
+		) as HTMLDivElement | null;
+		if (!analysisResults) {
+			logError("Analysis results element not found");
+			return;
+		}
+
+		let formattedContent: string;
+
+		try {
+			// Check if the analysis is JSON
+			const jsonObject = JSON.parse(analysis);
+			log("Analysis is valid JSON, formatting as HTML");
+
+			if (typeof jsonObject === "object") {
+				// For a JSON object, format it nicely
+				if (
+					jsonObject.markdown &&
+					typeof jsonObject.markdown === "string" &&
+					markedModule
+				) {
+					// If there's a markdown field and we have the marked library, render it
+					formattedContent = markedModule.marked.parse(jsonObject.markdown);
+					log("Rendered markdown content");
+				} else if (jsonObject.html && typeof jsonObject.html === "string") {
+					// If there's an HTML field, use it directly
+					formattedContent = jsonObject.html;
+					log("Using provided HTML content");
+				} else {
+					// Otherwise pretty-print the JSON
+					formattedContent = `<pre class="json-highlight">${highlightJson(
+						JSON.stringify(jsonObject, null, 2),
+					)}</pre>`;
+					log("Formatted JSON with syntax highlighting");
+				}
+			} else {
+				// If it's a primitive JSON value, just stringify it
+				formattedContent = `<pre>${JSON.stringify(jsonObject, null, 2)}</pre>`;
+				log("Formatted primitive JSON value");
+			}
+		} catch (jsonError) {
+			// Not JSON, try parsing as markdown if we have the library
+			log("Analysis is not JSON, trying markdown");
+			if (markedModule) {
+				try {
+					formattedContent = markedModule.marked.parse(analysis);
+					log("Parsed content as markdown");
+				} catch (markdownError) {
+					// If markdown parsing fails, just use as plain text
+					logError("Markdown parsing failed:", markdownError);
+					formattedContent = `<div>${analysis.replace(/\n/g, "<br>")}</div>`;
+					log("Using plain text with line breaks");
+				}
+			} else {
+				// No markdown parser, just use as plain text
+				formattedContent = `<div>${analysis.replace(/\n/g, "<br>")}</div>`;
+				log("Using plain text with line breaks (no markdown parser)");
+			}
+		}
+
+		// Set the content
+		analysisResults.innerHTML = formattedContent;
+		analysisResults.style.display = "block";
+
+		// Adjust layout as needed
+		updateUILayout();
+
+		log("Analysis displayed successfully");
+	} catch (error: any) {
+		logError("Error displaying analysis:", error);
+		handleAnalysisError("Failed to display analysis results");
+	}
+}
+
+function handleAnalysisError(errorMessage: string): void {
+	log("Handling analysis error:", errorMessage);
+
+	try {
+		// Hide the loading spinner if it's visible
+		const chatLoader = document.getElementById(
+			"chat-loader",
+		) as HTMLDivElement | null;
+		if (chatLoader) {
+			chatLoader.style.display = "none";
+		}
+
+		// Re-enable the prompt buttons
+		const promptButtons = document.querySelector(
+			".prompt-buttons",
+		) as HTMLDivElement | null;
+		if (promptButtons) {
+			promptButtons.style.display = "block";
+		}
+
+		// Get the analysis results container to display the error
+		const analysisResults = document.getElementById(
+			"analysis-results",
+		) as HTMLDivElement | null;
+		if (!analysisResults) {
+			logError("Analysis results element not found for displaying error");
+			return;
+		}
+
+		// Create and display error message
+		analysisResults.innerHTML = `
+			<div class="error-message">
+				<h3>Analysis Error</h3>
+				<p>${errorMessage}</p>
+				<p>Please try again or select a different prompt.</p>
+			</div>
+		`;
+		analysisResults.style.display = "block";
+
+		log("Error message displayed to user");
+	} catch (error: any) {
+		logError("Error handling analysis error display:", error);
+	}
+}
+
+function getPromptTextById(promptId: string): string {
+	log("Getting prompt text for ID:", promptId);
+
+	try {
+		// Lookup table for prompt texts
+		const prompts: { [key: string]: string } = {
+			describe: "Describe what you see in this image in detail.",
+			explain:
+				"Explain the code shown in this image, including its purpose and how it works.",
+			improve:
+				"Analyze this code and suggest improvements for better performance, readability, and maintainability.",
+			document:
+				"Generate documentation for this code, including usage examples and parameter descriptions.",
+			"extract-text": "Extract all text content from this image.",
+			"analyze-ui":
+				"Analyze the UI design shown in this image, describing its components and layout.",
+			"identify-content":
+				"Identify and describe the page structure, elements, and their relationships.",
+			"seo-analysis": "Analyze SEO factors visible in this content.",
+			"content-type-json":
+				"Generate a content type schema for the content shown in this image.",
+		};
+
+		return prompts[promptId] || "Describe what you see in this image.";
+	} catch (error: any) {
+		logError("Error getting prompt text:", error);
+		return "Describe what you see in this image.";
+	}
+}
+
+function highlightJson(json: string): string {
+	log("Highlighting JSON syntax");
+
+	try {
+		// Simple highlighting for JSON strings
+		return json.replace(
+			/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+			(match) => {
+				// Determine the type of the matched text
+				let cls = "json-number"; // Default to number
+				if (/^"/.test(match)) {
+					if (/:$/.test(match)) {
+						cls = "json-key"; // JSON key
+					} else {
+						cls = "json-string"; // JSON string
+					}
+				} else if (/true|false/.test(match)) {
+					cls = "json-boolean"; // JSON boolean
+				} else if (/null/.test(match)) {
+					cls = "json-null"; // JSON null
+				}
+				return `<span class="${cls}">${match}</span>`;
+			},
+		);
+	} catch (error: any) {
+		logError("Error highlighting JSON:", error);
+		return json; // Return unhighlighted JSON on error
+	}
+}
+			"seo-analysis": "Analyze SEO factors visible in this content.",
+			"content-type-json":
+				"Generate a content type schema for the content shown in this image.",
+		};
+
+		return prompts[promptId] || "Describe what you see in this image.";
+	} catch (error: any) {
+		logError("Error getting prompt text:", error);
+		return "Describe what you see in this image.";
+	}
+}
+
+function highlightJson(json: string): string {
+	log("Highlighting JSON syntax");
+
+	try {
+		// Simple highlighting for JSON strings
+		return json.replace(
+			/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+			(match) => {
+				// Determine the type of the matched text
+				let cls = "json-number"; // Default to number
+				if (/^"/.test(match)) {
+					if (/:$/.test(match)) {
+						cls = "json-key"; // JSON key
+					} else {
+						cls = "json-string"; // JSON string
+					}
+				} else if (/true|false/.test(match)) {
+					cls = "json-boolean"; // JSON boolean
+				} else if (/null/.test(match)) {
+					cls = "json-null"; // JSON null
+				}
+				return `<span class="${cls}">${match}</span>`;
+			},
+		);
+	} catch (error: any) {
+		logError("Error highlighting JSON:", error);
+		return json; // Return unhighlighted JSON on error
+	}
+}

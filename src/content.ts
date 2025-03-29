@@ -444,11 +444,20 @@ async function processSelection(rect: DOMRect): Promise<void> {
 
   try {
     // Notify that processing has started - this will show the loading skeleton in the side panel
-    chrome.runtime
-      .sendMessage({
+    try {
+      console.log("[DEBUG] Sending processingStarted message");
+      await chrome.runtime.sendMessage({
         action: "processingStarted",
-      })
-      .catch((err) => console.error("Failed to send processing started message:", err));
+        source: "content", // Add source to help with debugging
+        timestamp: new Date().toISOString(),
+      });
+      // Wait a moment to ensure the message is processed before sending the next one
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      console.log("[DEBUG] processingStarted message sent successfully");
+    } catch (err) {
+      console.error("Failed to send processing started message:", err);
+      // Continue anyway
+    }
 
     // Reset the overlay to a clean state instead of hiding it
     if (selectionOverlay) {
@@ -476,6 +485,7 @@ async function processSelection(rect: DOMRect): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Send the selection to the background script for processing
+    console.log("[DEBUG] Sending processSelection message");
     const response = await chrome.runtime.sendMessage({
       action: "processSelection",
       rect: {
@@ -484,9 +494,11 @@ async function processSelection(rect: DOMRect): Promise<void> {
         width: rect.width,
         height: rect.height,
       },
+      source: "content", // Add source to help with message routing
+      timestamp: new Date().toISOString(),
     });
 
-    console.log("Background script response:", response);
+    console.log("[DEBUG] processSelection response:", response);
 
     // Reset startPoint but keep the overlay active
     startPoint = null;

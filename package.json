@@ -27,6 +27,7 @@
     "@types/chrome": "^0.0.260",
     "@types/html2canvas": "^1.0.0",
     "@types/node": "^20.11.19",
+    "@types/uuid": "^10.0.0",
     "html2canvas": "^1.4.1",
     "sharp": "^0.33.2",
     "ts-loader": "^9.5.1",
@@ -39,6 +40,7 @@
     "@types/marked": "^5.0.2",
     "html2canvas": "^1.4.1",
     "marked": "^15.0.7",
-    "multer": "^1.4.5-lts.2"
+    "multer": "^1.4.5-lts.2",
+    "uuid": "^11.1.0"
   }
 }

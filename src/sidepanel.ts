@@ -1,4 +1,4 @@
-// Import logger utility first to ensure it's available immediately
+// Import logger utility first to ensure it\'s available immediately
 import { createSidePanelLogger } from "./utils";
 
 /**
@@ -9,162 +9,158 @@ import { createSidePanelLogger } from "./utils";
 // Set up logging immediately
 const { log, error: logError } = createSidePanelLogger();
 
-// Log that the script is starting
-log("Sidepanel script starting");
-
-// We'll import marked lazily when needed
+// We\'ll import marked lazily when needed
 let markedModule: any = null;
 
-// Configuration and state
+// --- State Variables ---
 let isSelectionModeActive = false;
 let currentTab: chrome.tabs.Tab | null = null;
 let selectedPromptId: string | null = null;
-
-// Track if capture is in progress
 let captureInProgress = false;
 let analysisInProgress = false;
-
-// Store the latest image URL
 let latestImageUrl: string | null = null;
+let loadedHistory: Capture[] = []; // In-memory store for loaded history
+let currentCaptureForAnalysis: Capture | null = null; // Track capture being analyzed/loaded from history
 
-// DOM elements
-const startButton: HTMLButtonElement | null = null;
-const processButton: HTMLButtonElement | null = null;
-const imageContainer: HTMLDivElement | null = null;
-const loadingIndicator: HTMLDivElement | null = null;
+// --- Type Definitions ---
+
+// Represents a single analysis performed on a capture
+interface AnalysisResult {
+  id: string; // Unique ID for this analysis instance (e.g., timestamp)
+  timestamp: number;
+  promptId: string; // e.g., 'describe', 'analyze-ui'
+  promptText: string; // The actual prompt text used
+  resultHtml: string; // The resulting HTML content from analysis
+}
+
+// Represents a single captured image and its associated analyses
+interface Capture {
+  id: string;
+  timestamp: number;
+  imageUrl: string;
+  // Changed from analysisResultHtml: string | null
+  analysisResults: AnalysisResult[]; // Array to store multiple analysis results
+}
+
+// --- Constants ---
+const MAX_HISTORY_ITEMS = 50;
+
+// Mirror PREDEFINED_PROMPTS from background script for UI labeling
+const PREDEFINED_PROMPTS = [
+  { id: "describe", text: "Describe what's in this image and extract any text content." },
+  { id: "extract-text", text: "Extract all text content from this image." },
+  {
+    id: "analyze-ui",
+    text: "Analyze this UI design and describe its components, layout, and functionality.",
+  },
+  {
+    id: "identify-content",
+    text: "Identify key content sections, headers, and navigation elements in this webpage.",
+  },
+  {
+    id: "seo-analysis",
+    text: "Analyze this webpage for SEO factors and suggest improvements.",
+  },
+  {
+    id: "content-type-json",
+    text: "Create content type json based on this content structure.",
+  },
+];
+
+// --- Core Functions ---
 
 // Initialize when the document is loaded
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   log("DOMContentLoaded fired - Initializing side panel UI");
 
   try {
-    // Import marked library after DOM is ready
-    import("marked")
-      .then((module) => {
-        markedModule = module;
-        try {
-          markedModule.marked.setOptions({
-            gfm: true,
-            breaks: true,
-          });
-          log("Markdown parser imported and configured successfully");
-        } catch (error: any) {
-          logError("Error configuring markdown parser:", error);
-          // Continue execution even if markdown parser fails
-        }
-      })
-      .catch((error: any) => {
-        logError("Failed to import markdown parser:", error);
-        // Continue without markdown support
+    // Import marked library
+    try {
+      const module = await import("marked");
+      markedModule = module;
+      markedModule.marked.setOptions({
+        gfm: true,
+        breaks: true,
       });
+      log("Markdown parser imported and configured successfully");
+    } catch (error: any) {
+      logError("Failed to import or configure markdown parser:", error);
+      // Continue without markdown support
+    }
 
-    // Get the active tab information
-    chrome.tabs
-      .query({ active: true, currentWindow: true })
-      .then((tabs) => {
-        if (tabs.length > 0) {
-          currentTab = tabs[0];
-          log("Connected to active tab:", currentTab.id, currentTab.url);
-        } else {
-          logError("No active tab found");
-        }
-      })
-      .catch((err) => {
-        logError("Failed to get active tab", err);
+    // Set up tab functionality
+    setupTabs();
+
+    // Load and display capture history
+    try {
+      loadedHistory = await loadCaptures();
+      displayHistory(loadedHistory);
+    } catch (error) {
+      logError("Failed to load or display initial capture history:", error);
+    }
+
+    // Get active tab info
+    try {
+      const tabs = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
       });
+      if (tabs.length > 0) {
+        currentTab = tabs[0];
+        log("Connected to active tab:", currentTab.id, currentTab.url);
+      } else {
+        logError("No active tab found");
+      }
+    } catch (err) {
+      logError("Failed to get active tab", err);
+    }
 
-    // Get reference to toggle button and prompt section
+    // Get UI elements
     const selectionToggle = document.getElementById(
       "selection-toggle"
     ) as HTMLButtonElement | null;
-    log("Found selection-toggle element:", !!selectionToggle);
-
     const imagePreview = document.getElementById(
       "image-preview"
     ) as HTMLDivElement | null;
-    log("Found image-preview element:", !!imagePreview);
-
     const promptSection = document.getElementById(
       "prompt-section"
     ) as HTMLDivElement | null;
-    log("Found prompt-section element:", !!promptSection);
 
-    // Validate UI elements
     if (!selectionToggle || !imagePreview || !promptSection) {
       logError("Required UI elements not found in DOM");
-      return;
+      return; // Stop initialization if essential elements are missing
     }
 
-    log("All required UI elements loaded successfully");
+    // Set up selection toggle listener
+    selectionToggle.addEventListener("click", async () => {
+      log("Selection toggle button clicked");
+      const wasActive = isSelectionModeActive;
+      isSelectionModeActive = !wasActive;
+      log(`Selection mode ${isSelectionModeActive ? "activated" : "deactivated"}`);
 
-    // Set up toggle button event listener
-    log("Adding click event listener to selection toggle button");
-    selectionToggle.addEventListener("click", async (event) => {
+      updateSelectionToggleState(isSelectionModeActive, selectionToggle);
+
       try {
-        log("Selection toggle button clicked", event);
-
-        // Get current state before toggling
-        const wasActive = isSelectionModeActive;
-
-        // Toggle selection mode state
-        isSelectionModeActive = !wasActive;
-
-        log(`Selection mode ${isSelectionModeActive ? "activated" : "deactivated"}`);
-
-        try {
-          // Update UI immediately to provide visual feedback
-          updateSelectionToggleState(isSelectionModeActive, selectionToggle);
-          log("Updated selection toggle UI state");
-
-          if (isSelectionModeActive) {
-            // Start selection mode
-            log("Sending startSelection message to background script");
-            const response = await chrome.runtime.sendMessage({
-              action: "startSelection",
-              source: "sidePanel",
-            });
-
-            log("Background service worker response for startSelection:", response);
-
-            if (response && response.status === "error") {
-              // If there's an error, revert the selection state
-              isSelectionModeActive = false;
-              updateSelectionToggleState(false, selectionToggle);
-              logError("Error starting selection:", response.message);
-            }
-          } else {
-            // Cancel selection mode
-            log("Sending cancelSelection message to background script");
-            const response = await chrome.runtime.sendMessage({
-              action: "cancelSelection",
-              source: "sidePanel",
-            });
-
-            log("Background service worker response for cancelSelection:", response);
-
-            if (response && response.status === "error") {
-              logError("Error cancelling selection:", response.message);
-            }
-          }
-        } catch (error) {
-          logError(
-            `Failed to ${isSelectionModeActive ? "start" : "cancel"} selection mode`,
-            error
-          );
-
-          // Revert the toggle state on error
+        log(
+          `Sending toggleSelectionMode message to background script (active: ${isSelectionModeActive})`
+        );
+        const response = await chrome.runtime.sendMessage({
+          action: "toggleSelectionMode",
+          active: isSelectionModeActive,
+          source: "sidePanel",
+        });
+        log(`Background response for toggleSelectionMode:`, response);
+        if (response && response.status === "error") {
+          logError(`Error toggling selection mode:`, response.message);
+          // Revert state on error
           isSelectionModeActive = wasActive;
           updateSelectionToggleState(wasActive, selectionToggle);
         }
-      } catch (outerError) {
-        logError("Unexpected error in selection toggle event handler:", outerError);
-        // Try to reset the UI state
-        try {
-          isSelectionModeActive = false;
-          updateSelectionToggleState(false, selectionToggle);
-        } catch (resetError) {
-          logError("Failed to reset UI after error:", resetError);
-        }
+      } catch (error) {
+        logError(`Failed to send toggleSelectionMode message:`, error);
+        // Revert state on error
+        isSelectionModeActive = wasActive;
+        updateSelectionToggleState(wasActive, selectionToggle);
       }
     });
 
@@ -172,598 +168,670 @@ document.addEventListener("DOMContentLoaded", () => {
     const promptButtons = document.querySelectorAll(".prompt-button");
     promptButtons.forEach((button) => {
       button.addEventListener("click", async () => {
-        if (!latestImageUrl || analysisInProgress) {
+        if (!latestImageUrl || analysisInProgress || !currentCaptureForAnalysis) {
+          log("Analysis trigger prevented: Conditions not met.");
           return;
+        }
+        if (currentCaptureForAnalysis.analysisResults.length > 0) {
+          log(
+            "Analysis trigger prevented: Result already exists for this historical capture."
+          );
+          return; // Don't re-analyze if viewing history with results
         }
 
         try {
           const promptId = (button as HTMLElement).dataset.promptId || "describe";
           selectedPromptId = promptId;
+          log(`Prompt button clicked: ${promptId}`);
 
-          // Hide prompt buttons and show the loader
-          const promptButtons = document.querySelector(
-            ".prompt-buttons"
-          ) as HTMLDivElement | null;
-          const chatLoader = document.getElementById(
-            "chat-loader"
-          ) as HTMLDivElement | null;
-
-          if (promptButtons && chatLoader) {
-            promptButtons.style.display = "none";
-            chatLoader.style.display = "block";
-          }
-
+          setAnalysisLoadingState(true);
           analysisInProgress = true;
 
-          // Send the image for analysis with the selected prompt
           const response = await chrome.runtime.sendMessage({
             action: "analyzeImage",
             imageUrl: latestImageUrl,
             customPrompt: getPromptTextById(promptId),
           });
 
-          log("Background service worker response for analysis:", response);
+          log("Background service worker response for analysis request:", response);
 
+          // Note: Actual result handling happens in the 'analysisComplete' message listener
+          // Error handling *for the request itself* can happen here
           if (response && response.status === "error") {
-            logError("Error analyzing image:", response.message);
-
-            // Show error in the chat loader text
-            if (chatLoader) {
-              const loaderText = chatLoader.querySelector(".chat-loader-text");
-              if (loaderText) {
-                loaderText.textContent = "Analysis failed. Try again.";
-              }
-            }
-
-            setTimeout(() => {
-              // Reset and show prompt buttons again
-              if (promptButtons && chatLoader) {
-                promptButtons.style.display = "flex";
-                chatLoader.style.display = "none";
-
-                // Reset chat loader text
-                const loaderText = chatLoader.querySelector(".chat-loader-text");
-                if (loaderText) {
-                  loaderText.textContent = "Analyzing content...";
-                }
-              }
-              analysisInProgress = false;
-            }, 3000);
+            logError(
+              "Background script reported error initiating analysis:",
+              response.message
+            );
+            setAnalysisLoadingState(false, "Error starting analysis. Try again.");
+            analysisInProgress = false;
           }
         } catch (error) {
-          logError("Failed to analyze image", error);
-
-          // Reset UI on error
-          const promptButtons = document.querySelector(
-            ".prompt-buttons"
-          ) as HTMLDivElement | null;
-          const chatLoader = document.getElementById(
-            "chat-loader"
-          ) as HTMLDivElement | null;
-
-          if (promptButtons && chatLoader) {
-            promptButtons.style.display = "flex";
-            chatLoader.style.display = "none";
-
-            // Reset chat loader text
-            const loaderText = chatLoader.querySelector(".chat-loader-text");
-            if (loaderText) {
-              loaderText.textContent = "Analyzing content...";
-            }
-          }
-
+          logError("Failed to send analyzeImage message", error);
+          setAnalysisLoadingState(false, "Error occurred sending request.");
           analysisInProgress = false;
         }
       });
     });
-
-    // Reset UI to initial state
-    resetUI();
-
-    // Listen for messages from the background service worker
-    setupMessageListener();
-
-    // Let the background script know we're ready
-    notifyBackgroundReady();
-
-    // Listen for window resize to adjust UI
-    window.addEventListener("resize", updateUILayout);
   } catch (error) {
-    logError("Error initializing side panel:", error);
+    logError("Critical error during side panel initialization:", error);
+    // Maybe display an error message to the user in the UI here
   }
 });
 
-// Reset UI to initial state
-function resetUI(): void {
-  log("Resetting UI to initial state");
+// --- Message Listener ---
+chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
+  log("Message received in sidepanel:", message);
 
-  const selectionToggle = document.getElementById(
-    "selection-toggle"
-  ) as HTMLButtonElement | null;
-  const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
-  const loadingSpinner = document.getElementById(
-    "loading-spinner"
-  ) as HTMLDivElement | null;
-  const promptSection = document.getElementById(
-    "prompt-section"
-  ) as HTMLDivElement | null;
-
-  if (selectionToggle && imagePreview) {
-    // Reset toggle button
-    selectionToggle.classList.remove("active");
-    isSelectionModeActive = false;
-
-    // Reset image preview
-    imagePreview.style.display = "none";
-
-    // Clear any existing images
-    const existingImages = imagePreview.querySelectorAll("img");
-    existingImages.forEach((img) => img.remove());
-
-    // Reset loading spinner
-    if (loadingSpinner) {
-      loadingSpinner.style.display = "none";
-    }
-  }
-
-  captureInProgress = false;
-  latestImageUrl = null;
-  selectedPromptId = null;
-
-  if (promptSection) {
-    promptSection.style.display = "none";
-
-    // Reset prompt buttons
-    const promptButtons = document.querySelector(
-      ".prompt-buttons"
-    ) as HTMLDivElement | null;
-    const chatLoader = document.getElementById("chat-loader") as HTMLDivElement | null;
-
-    if (promptButtons) {
-      promptButtons.style.display = "flex";
-
-      const buttons = promptButtons.querySelectorAll(".prompt-button");
-      buttons.forEach((btn) => {
-        const btnElement = btn as HTMLButtonElement;
-        btnElement.disabled = false;
-      });
-    }
-
-    if (chatLoader) {
-      chatLoader.style.display = "none";
-
-      // Reset chat loader text
-      const loaderText = chatLoader.querySelector(".chat-loader-text");
-      if (loaderText) {
-        loaderText.textContent = "Analyzing content...";
+  switch (message.action) {
+    case "screenshotCaptured":
+      if (message.data) {
+        await handleScreenshotCaptured(message.data);
+        sendResponse({ status: "success", received: true });
+      } else {
+        logError("screenshotCaptured message received without data");
+        sendResponse({ status: "error", message: "Missing data" });
       }
-    }
+      // Indicate async response only if needed, but handleScreenshotCaptured is async
+      return true; // Keep channel open for async handleScreenshotCaptured
+
+    case "selectionModeUpdate":
+      log("Received selection mode update from background:", message.active);
+      isSelectionModeActive = message.active;
+      const toggleButton = document.getElementById(
+        "selection-toggle"
+      ) as HTMLButtonElement | null;
+      if (toggleButton) {
+        updateSelectionToggleState(isSelectionModeActive, toggleButton);
+      }
+      sendResponse({ status: "success" });
+      break; // Sync response is fine
+
+    case "analysisComplete":
+      log("Analysis complete message received");
+      analysisInProgress = false; // Reset flag regardless of outcome
+      setAnalysisLoadingState(false); // Stop loader
+
+      if (message.resultHtml) {
+        // Ensure we have context for the capture and the prompt used
+        if (currentCaptureForAnalysis && selectedPromptId) {
+          try {
+            // Create the new analysis result object
+            const newAnalysis: AnalysisResult = {
+              id: Date.now().toString(), // Unique ID for this analysis
+              timestamp: Date.now(),
+              promptId: selectedPromptId,
+              promptText: getPromptTextById(selectedPromptId), // Get full text
+              resultHtml: message.resultHtml,
+            };
+
+            // Update the capture with the new analysis result
+            await updateCaptureResult(currentCaptureForAnalysis.id, newAnalysis);
+            log(`Saved analysis result for capture ${currentCaptureForAnalysis.id}`);
+
+            // Update the object in memory too, if it's the one being viewed
+            // Find the capture in memory and add the new result
+            const captureInMemory = loadedHistory.find(
+              (c) => c.id === currentCaptureForAnalysis!.id
+            );
+            if (captureInMemory) {
+              captureInMemory.analysisResults.push(newAnalysis);
+            } else {
+              // This case should ideally not happen if updateCaptureResult worked correctly
+              // but handles potential inconsistencies between storage and memory updates.
+              logError(
+                "Capture context mismatch after update, reloading history might be needed."
+              );
+            }
+          } catch (error) {
+            logError(
+              `Failed to save analysis result for capture ${currentCaptureForAnalysis.id}:`,
+              error
+            );
+            // Inform user potentially?
+          }
+        } else {
+          logError(
+            "Analysis complete, but missing capture context or prompt ID to save result."
+          );
+        }
+        // Display the results received (might remove this later if results are shown in history)
+        displayAnalysisResults(message.resultHtml);
+        sendResponse({ status: "success" });
+      } else {
+        logError("Analysis complete message missing resultHtml");
+        // Display an error message in the results area
+        displayAnalysisResults(
+          "<p>Error: Analysis completed but no result data received.</p>"
+        );
+        sendResponse({ status: "error", message: "Missing resultHtml" });
+      }
+      // Indicate async response because updateCaptureResult is async
+      return true;
+
+    case "analysisError":
+      logError("Analysis error message received:", message.error);
+      analysisInProgress = false; // Reset flag
+      setAnalysisLoadingState(
+        false,
+        `Analysis Error: ${message.error || "Unknown error"}`
+      );
+      // Display the error in the results area
+      displayAnalysisResults(
+        `<p>Error during analysis: ${message.error || "Unknown error"}</p>`
+      );
+      sendResponse({ status: "error acknowledged" });
+      break; // Sync response is fine
+
+    default:
+      log("Unknown message action received:", message.action);
+      sendResponse({ status: "ignored", reason: "Unknown action" });
+      break; // Sync response is fine
   }
 
-  const analysisResults = document.getElementById(
-    "analysis-results"
-  ) as HTMLDivElement | null;
+  // Default return false if no async operation requires keeping the channel open
+  // However, the async cases above return true, so this might not be strictly necessary
+  // but good practice for clarity if adding more sync cases later.
+  return false;
+});
 
-  if (analysisResults) {
-    analysisResults.style.display = "none";
-    analysisResults.textContent = "";
-  }
-}
+// --- UI Update Functions ---
 
-// Set up message listener
-function setupMessageListener(): void {
-  log("Setting up message listener");
+function setupTabs(): void {
+  try {
+    log("Setting up tab functionality");
+    const tabButtons = document.querySelectorAll<HTMLElement>(".tab-button");
+    const tabContents = document.querySelectorAll<HTMLElement>(".tab-content");
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    log("Received message:", message.action, message);
-
-    switch (message.action) {
-      case "selectionComplete":
-        // We no longer need to handle this separately as the auto-capture works
-        sendResponse({ status: "ok" });
-        break;
-
-      case "selectionCancelled":
-        handleSelectionCancelled();
-        sendResponse({ status: "ok" });
-        break;
-
-      case "processingStarted":
-        handleProcessingStarted();
-        sendResponse({ status: "ok" });
-        break;
-
-      case "screenshotCaptured":
-        if (message.data) {
-          handleScreenshotCaptured(message.data);
-        }
-        sendResponse({ status: "ok" });
-        break;
-
-      case "analysisDone":
-        if (message.analysis) {
-          displayAnalysis(message.analysis);
-        }
-        sendResponse({ status: "ok" });
-        break;
-
-      case "analysisError":
-        handleAnalysisError(message.message || "Unknown error occurred");
-        sendResponse({ status: "ok" });
-        break;
-
-      case "selectionStatus":
-        // No longer need to handle status messages
-        sendResponse({ status: "ok" });
-        break;
-
-      default:
-        log("Unknown message action:", message.action);
-        sendResponse({ status: "error", message: "Unknown action" });
+    if (tabButtons.length === 0 || tabContents.length === 0) {
+      logError("Could not find tab buttons or content elements.");
+      return;
     }
 
-    return true; // Keep the message channel open for async responses
-  });
-}
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const tabId = button.getAttribute("data-tab");
+        if (!tabId) return logError("No tab ID found on clicked button");
+        log(`Tab button clicked: ${tabId}`);
 
-// Notify background that the side panel is ready
-function notifyBackgroundReady(): void {
-  log("Notifying background service worker that the side panel is ready");
+        tabButtons.forEach((btn) => btn.classList.remove("active"));
+        button.classList.add("active");
 
-  chrome.runtime
-    .sendMessage({
-      action: "sidePanelReady",
-      source: "sidePanel",
-    })
-    .catch((error) => {
-      logError("Failed to send ready notification to background", error);
+        tabContents.forEach((content) => content.classList.remove("active"));
+        const selectedTabContent = document.getElementById(tabId);
+        if (selectedTabContent) {
+          selectedTabContent.classList.add("active");
+          log(`Activated tab content: ${tabId}`);
+        } else {
+          logError(`Tab content not found: ${tabId}`);
+        }
+      });
     });
-}
-
-// Handle selection cancelled message
-function handleSelectionCancelled(): void {
-  log("Handling selection cancelled");
-
-  const selectionToggle = document.getElementById(
-    "selection-toggle"
-  ) as HTMLButtonElement | null;
-
-  if (selectionToggle) {
-    updateSelectionToggleState(false, selectionToggle);
-    isSelectionModeActive = false;
-    log("Selection mode deactivated");
+    log("Tab functionality setup complete");
+  } catch (error) {
+    logError("Error setting up tab functionality:", error);
   }
 }
 
-// Handle screenshot captured message
-function handleScreenshotCaptured(dataUrl: string): void {
-  log("Screenshot captured, data URL received");
-
-  // Always consider the screenshot captured successfully if we got here
-  latestImageUrl = dataUrl;
-  captureInProgress = false;
-
-  // Display the captured image
-  displayImage(dataUrl);
-
-  // Show the prompt section directly
-  showPromptSection();
-}
-
-// Show prompt section
-function showPromptSection(): void {
-  log("Showing prompt section");
-
-  const promptSection = document.getElementById(
-    "prompt-section"
-  ) as HTMLDivElement | null;
-
-  if (promptSection) {
-    promptSection.style.display = "block";
-  }
-}
-
-// Update UI layout based on window size
-function updateUILayout(): void {
-  // Nothing to adjust with fixed height
-}
-
-// Display image in the side panel
-function displayImage(imageUrl: string): void {
-  // Get the image preview element
-  const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
-  const loadingSpinner = document.getElementById(
-    "loading-spinner"
-  ) as HTMLDivElement | null;
-
-  if (!imagePreview || !loadingSpinner) {
-    logError("Image preview or loading spinner element not found");
-    return;
-  }
-
-  // Hide the loading spinner
-  loadingSpinner.style.display = "none";
-
-  // Make sure the preview container is visible
-  imagePreview.style.display = "flex";
-
-  // Create image element
-  const img = document.createElement("img");
-  img.src = imageUrl;
-  img.alt = "Captured screenshot";
-  img.style.maxWidth = "100%";
-  img.style.maxHeight = "100%";
-  img.style.objectFit = "contain";
-
-  img.onload = () => {
-    log("Image loaded successfully");
-    captureInProgress = false;
-  };
-
-  img.onerror = (e) => {
-    logError("Error loading image", e);
-    captureInProgress = false;
-    // Show error message in the preview area
-    imagePreview.innerHTML =
-      '<div style="color: var(--error-color);">Error loading image</div>';
-  };
-
-  // Remove any existing images to avoid duplicates
-  const existingImages = imagePreview.querySelectorAll("img");
-  existingImages.forEach((img) => img.remove());
-
-  // Add the new image
-  imagePreview.appendChild(img);
-
-  // Store latest image URL
-  latestImageUrl = imageUrl;
-}
-
-// Helper function to update the selection toggle UI state
 function updateSelectionToggleState(
   active: boolean,
-  toggleButton: HTMLButtonElement
+  toggleButton: HTMLButtonElement | null // Allow for null check
 ): void {
+  if (!toggleButton) return; // Guard clause
   if (active) {
     toggleButton.classList.add("active");
-    const buttonText = toggleButton.querySelector(".button-text");
-    if (buttonText) {
-      buttonText.textContent = "Cancel Selection";
-    }
+    toggleButton.title = "Cancel Selection";
   } else {
     toggleButton.classList.remove("active");
-    const buttonText = toggleButton.querySelector(".button-text");
-    if (buttonText) {
-      buttonText.textContent = "Select Area";
-    }
+    toggleButton.title = "Capture Area";
   }
 }
 
-// Handle processing started message
-function handleProcessingStarted(): void {
-  log("Handling processing started");
-
-  captureInProgress = true;
-
+function displayImage(imageUrl: string): void {
   const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
-  const loadingSpinner = document.getElementById(
-    "loading-spinner"
-  ) as HTMLDivElement | null;
+  if (!imagePreview) return logError("Image preview element not found");
 
-  if (imagePreview && loadingSpinner) {
-    // Show image preview container and loading spinner
-    imagePreview.style.display = "flex";
-    loadingSpinner.style.display = "block";
-  }
+  log("Displaying image in preview area");
+  imagePreview.innerHTML = ""; // Clear previous content
+  const img = document.createElement("img");
+  img.src = imageUrl;
+  img.alt = "Captured content";
+  img.style.display = "block"; // Ensure image is visible
+  img.onerror = () => {
+    logError("Failed to load image preview:", imageUrl);
+    imagePreview.innerHTML =
+      '<p style="color: var(--error-color); padding: 10px;">Failed to load image.</p>';
+  };
+  imagePreview.appendChild(img);
+  imagePreview.style.display = "flex"; // Make container visible
+  latestImageUrl = imageUrl; // Update state
 }
 
-// Display analysis in the side panel
-function displayAnalysis(analysis: string): void {
-  log("Displaying analysis results");
+function showPromptSection(): void {
+  const promptSection = document.getElementById(
+    "prompt-section"
+  ) as HTMLDivElement | null;
+  const analysisResults = document.getElementById(
+    "analysis-results"
+  ) as HTMLDivElement | null;
+  if (!promptSection || !analysisResults)
+    return logError("Prompt section or analysis results element not found");
 
+  log("Showing prompt section");
+  promptSection.style.display = "block";
+  analysisResults.style.display = "none"; // Hide results when showing prompts
+  analysisResults.innerHTML = ""; // Clear old results
+  setAnalysisLoadingState(false); // Ensure loading indicator is reset
+}
+
+function displayAnalysisResults(htmlContent: string): void {
   const analysisResults = document.getElementById(
     "analysis-results"
   ) as HTMLDivElement | null;
   const promptSection = document.getElementById(
     "prompt-section"
   ) as HTMLDivElement | null;
+  if (!analysisResults || !promptSection)
+    return logError("Analysis results or prompt section element not found");
 
-  if (analysisResults) {
-    try {
-      // Check if markdown is available
-      if (markedModule && markedModule.marked) {
-        // Parse markdown to HTML - handle potential promise
-        const htmlContent = markedModule.marked.parse(analysis);
+  log("Displaying analysis results");
+  try {
+    // Use 'unsafe-html' potentially if marked requires it, or sanitize if needed
+    analysisResults.innerHTML = markedModule
+      ? markedModule.marked.parse(htmlContent)
+      : htmlContent;
+  } catch (parseError) {
+    logError("Error parsing markdown for analysis results:", parseError);
+    // Display raw content safely escaped within <pre> on error
+    const pre = document.createElement("pre");
+    pre.textContent = htmlContent;
+    analysisResults.innerHTML = `<p style="color: var(--error-color);">Error displaying analysis results.</p>`;
+    analysisResults.appendChild(pre);
+  }
+  analysisResults.style.display = "block"; // Show results area
+  promptSection.style.display = "none"; // Hide prompts
+  setAnalysisLoadingState(false); // Ensure loading indicator is hidden
+}
 
-        // Set the analysis HTML content
-        if (typeof htmlContent === "string") {
-          analysisResults.innerHTML = htmlContent;
+function setAnalysisLoadingState(
+  isLoading: boolean,
+  message = "Analyzing content..."
+): void {
+  const promptButtons = document.querySelector(
+    ".prompt-buttons"
+  ) as HTMLDivElement | null;
+  const chatLoader = document.getElementById("chat-loader") as HTMLDivElement | null;
+  if (!promptButtons || !chatLoader)
+    return logError("Prompt buttons or chat loader elements not found");
 
-          // Apply syntax highlighting for code blocks
-          const codeBlocks = analysisResults.querySelectorAll("pre code");
-          codeBlocks.forEach((block) => {
-            // Add language classes for JSON if detected
-            if (block.textContent?.trim().startsWith("{")) {
-              block.parentElement?.classList.add("language-json");
+  const loaderText = chatLoader.querySelector(".chat-loader-text");
 
-              try {
-                // Parse the JSON to ensure it's valid
-                const jsonContent = block.textContent;
+  if (isLoading) {
+    promptButtons.style.display = "none";
+    chatLoader.style.display = "block";
+    if (loaderText) loaderText.textContent = message;
+  } else {
+    // Only show prompt buttons if analysis isn't currently displayed
+    const analysisResults = document.getElementById(
+      "analysis-results"
+    ) as HTMLDivElement | null;
+    if (!analysisResults || analysisResults.style.display === "none") {
+      promptButtons.style.display = "flex";
+    } else {
+      promptButtons.style.display = "none"; // Keep hidden if results are shown
+    }
+    chatLoader.style.display = "none";
+    // Reset loader text to default unless a specific final message was provided
+    if (loaderText && message !== "Analyzing content...") {
+      // Display final status/error briefly? Or maybe just log it.
+      // For now, just reset. Consider adding a temporary message display if needed.
+      loaderText.textContent = "Analyzing content...";
+    } else if (loaderText) {
+      loaderText.textContent = "Analyzing content..."; // Reset to default
+    }
+  }
+}
 
-                if (jsonContent) {
-                  // Use a more robust approach to tokenize and highlight JSON
-                  const highlightedJson = highlightJson(jsonContent);
-                  if (highlightedJson) {
-                    block.innerHTML = highlightedJson;
-                  }
-                }
-              } catch (jsonError) {
-                // If JSON parsing fails, leave as is
-                log("Error highlighting JSON, leaving as plain text", jsonError);
-              }
+// --- Screenshot Handling ---
+
+async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
+  log("Handling screenshot captured");
+  captureInProgress = false; // Reset capture flag
+  currentCaptureForAnalysis = null; // Reset context, this is a NEW capture
+
+  displayImage(dataUrl);
+  showPromptSection(); // Always show prompts for a new capture
+
+  try {
+    // Save the capture *without* analysis results initially
+    const newCapture = await saveCapture(dataUrl);
+    currentCaptureForAnalysis = newCapture; // Set context for this new capture
+    addCaptureToHistoryUI(newCapture); // Add to UI list
+  } catch (error) {
+    logError("Failed to save or update history UI for new capture:", error);
+  }
+}
+
+// --- Capture History Functions ---
+
+async function saveCapture(imageUrl: string): Promise<Capture> {
+  const newCapture: Capture = {
+    id: Date.now().toString(),
+    timestamp: Date.now(),
+    imageUrl: imageUrl,
+    analysisResults: [], // Initialize analysis results as empty array
+  };
+  log("Saving new capture:", newCapture.id);
+
+  try {
+    // Update storage
+    const result = await chrome.storage.local.get("captureHistory");
+    let history: Capture[] = result.captureHistory || [];
+    history.unshift(newCapture); // Add to the beginning
+    if (history.length > MAX_HISTORY_ITEMS) {
+      history = history.slice(0, MAX_HISTORY_ITEMS); // Limit size
+    }
+    await chrome.storage.local.set({ captureHistory: history });
+    log(`Capture history updated in storage. Total items: ${history.length}`);
+
+    // Update in-memory history consistently
+    loadedHistory.unshift(newCapture);
+    if (loadedHistory.length > MAX_HISTORY_ITEMS) {
+      loadedHistory = loadedHistory.slice(0, MAX_HISTORY_ITEMS);
+    }
+    log(`In-memory history updated. Total items: ${loadedHistory.length}`);
+
+    return newCapture; // Return the newly created capture object
+  } catch (error) {
+    logError("Error saving capture to storage:", error);
+    throw error; // Re-throw to allow caller to handle
+  }
+}
+
+async function loadCaptures(): Promise<Capture[]> {
+  log("Loading capture history from storage");
+  try {
+    const result = await chrome.storage.local.get("captureHistory");
+    let history: Capture[] = result.captureHistory || [];
+    log(`Loaded ${history.length} captures from history`);
+    // Ensure all loaded captures have the analysisResults field (backward compatibility)
+    // Initialize as empty array if missing. Also sort by timestamp descending.
+    history = history
+      .map((c) => ({
+        ...c,
+        // Ensure analysisResults is an array, provide default empty array if not
+        analysisResults: Array.isArray(c.analysisResults) ? c.analysisResults : [],
+      }))
+      .sort((a, b) => b.timestamp - a.timestamp);
+    return history;
+  } catch (error) {
+    logError("Error loading capture history:", error);
+    return []; // Return empty array on error
+  }
+}
+
+async function updateCaptureResult(
+  captureId: string,
+  newAnalysis: AnalysisResult // Pass the full analysis object
+): Promise<void> {
+  log(`Updating analysis result for capture: ${captureId}`);
+  let historyUpdated = false;
+  try {
+    // --- Update in storage ---
+    const result = await chrome.storage.local.get("captureHistory");
+    const storageHistory: Capture[] = result.captureHistory || [];
+    const storageIndex = storageHistory.findIndex((capture) => capture.id === captureId);
+
+    if (storageIndex !== -1) {
+      // Ensure the analysisResults array exists before pushing
+      if (!Array.isArray(storageHistory[storageIndex].analysisResults)) {
+        storageHistory[storageIndex].analysisResults = [];
+      }
+      storageHistory[storageIndex].analysisResults.push(newAnalysis); // Push the new result object
+      await chrome.storage.local.set({ captureHistory: storageHistory });
+      log(`Successfully updated analysis result in storage for capture: ${captureId}`);
+      historyUpdated = true;
+    } else {
+      logError(
+        `Capture not found in storage for ID: ${captureId}. Cannot update result.`
+      );
+      // Don't throw here, maybe the in-memory version is correct? Log is sufficient.
+    }
+  } catch (error) {
+    logError(
+      `Error updating analysis result in storage for capture ${captureId}:`,
+      error
+    );
+    // Don't necessarily throw, try updating memory anyway if possible
+  }
+
+  // --- Update in-memory history ---
+  try {
+    const inMemoryIndex = loadedHistory.findIndex((capture) => capture.id === captureId);
+    if (inMemoryIndex !== -1) {
+      // Ensure the analysisResults array exists before pushing
+      if (!Array.isArray(loadedHistory[inMemoryIndex].analysisResults)) {
+        loadedHistory[inMemoryIndex].analysisResults = [];
+      }
+      loadedHistory[inMemoryIndex].analysisResults.push(newAnalysis); // Push the new result object
+      log(`Successfully updated analysis result in memory for capture: ${captureId}`);
+      historyUpdated = true;
+    } else {
+      // This might happen if history was loaded before the item was fully saved, less critical
+      log(`Capture ${captureId} not found in loadedHistory during update.`);
+    }
+  } catch (memError) {
+    logError(`Error updating in-memory history for capture ${captureId}:`, memError);
+  }
+
+  if (!historyUpdated) {
+    // If neither storage nor memory could be updated, throw an error
+    // so the caller knows the save might have failed.
+    throw new Error(
+      `Failed to update analysis result for capture ${captureId} in both storage and memory.`
+    );
+  }
+}
+
+function renderHistoryItem(capture: Capture): HTMLLIElement {
+  const listItem = document.createElement("li");
+  listItem.className = "history-item";
+  listItem.dataset.captureId = capture.id;
+
+  // --- Header Part (Always Visible) ---
+  const header = document.createElement("div");
+  header.className = "history-item-header";
+
+  const img = document.createElement("img");
+  img.className = "history-thumbnail";
+  img.src = capture.imageUrl;
+  img.alt = `Capture from ${new Date(capture.timestamp).toLocaleString()}`;
+  img.onerror = () => {
+    img.style.visibility = "hidden";
+  };
+
+  const textContainer = document.createElement("div");
+  textContainer.className = "history-item-text";
+
+  const timestampSpan = document.createElement("span");
+  timestampSpan.className = "history-timestamp";
+  timestampSpan.textContent = new Date(capture.timestamp).toLocaleString([], {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+
+  const statusSpan = document.createElement("span");
+  statusSpan.className = "history-status";
+  const analysisCount = capture.analysisResults?.length || 0;
+  statusSpan.textContent =
+    analysisCount === 1 ? "1 Analysis" : `${analysisCount} Analyses`;
+  statusSpan.style.color =
+    analysisCount > 0 ? "var(--success-color)" : "var(--text-secondary)";
+
+  // Add an indicator for expansion (e.g., chevron icon)
+  const expandIndicator = document.createElement("span");
+  expandIndicator.className = "expand-indicator";
+  expandIndicator.innerHTML = "&#9656;"; // Right-pointing triangle
+
+  textContainer.appendChild(timestampSpan);
+  textContainer.appendChild(statusSpan);
+  header.appendChild(img);
+  header.appendChild(textContainer);
+  header.appendChild(expandIndicator); // Add indicator to the header
+
+  // --- Collapsible Content Part (Initially Hidden) ---
+  const content = document.createElement("div");
+  content.className = "history-item-content";
+  // Initially hidden via CSS
+
+  listItem.appendChild(header);
+  listItem.appendChild(content);
+
+  // --- Click Listener for Expansion ---
+  header.addEventListener("click", () => {
+    const isExpanded = listItem.classList.toggle("expanded");
+    expandIndicator.innerHTML = isExpanded ? "&#9662;" : "&#9656;"; // Toggle indicator
+
+    // Populate content only on first expansion
+    if (isExpanded && !content.dataset.populated) {
+      log(`Populating analysis history for capture: ${capture.id}`);
+      content.dataset.populated = "true"; // Mark as populated
+
+      // Always create the containers
+      const analysisList = document.createElement("ul");
+      analysisList.className = "analysis-list";
+
+      const resultDisplay = document.createElement("div");
+      resultDisplay.className = "analysis-result-display";
+      resultDisplay.style.display = "none"; // Hide initially
+
+      content.appendChild(analysisList); // Add list container
+      content.appendChild(resultDisplay); // Add result display container
+
+      const currentAnalysisCount = capture.analysisResults?.length || 0; // Get current count
+
+      if (currentAnalysisCount > 0) {
+        // Sort analyses by timestamp, newest first
+        const sortedAnalyses = [...capture.analysisResults].sort(
+          (a, b) => b.timestamp - a.timestamp
+        );
+
+        sortedAnalyses.forEach((analysis) => {
+          const analysisItem = document.createElement("li");
+          analysisItem.className = "analysis-list-item";
+          analysisItem.dataset.analysisId = analysis.id;
+
+          // Set button text directly (prompt label)
+          const promptInfo = PREDEFINED_PROMPTS.find(
+            (p: { id: string; text: string }) => p.id === analysis.promptId
+          );
+          analysisItem.textContent = promptInfo
+            ? promptInfo.text.split(" ")[0]
+            : analysis.promptId; // Use textContent for button
+          analysisItem.title = analysis.promptText; // Keep full prompt on hover
+
+          analysisItem.addEventListener("click", (e) => {
+            e.stopPropagation();
+            analysisList
+              .querySelectorAll(".analysis-list-item")
+              .forEach((item) => item.classList.remove("selected"));
+            analysisItem.classList.add("selected");
+            log(`Displaying analysis result: ${analysis.id}`);
+            try {
+              resultDisplay.innerHTML = markedModule
+                ? markedModule.marked.parse(analysis.resultHtml)
+                : analysis.resultHtml;
+              resultDisplay.style.display = "block";
+            } catch (parseError) {
+              logError("Error parsing markdown for analysis results:", parseError);
+              resultDisplay.innerHTML = `<p style="color: var(--error-color);">Error displaying analysis.</p><pre>${analysis.resultHtml}</pre>`;
+              resultDisplay.style.display = "block";
             }
           });
-        } else if (htmlContent instanceof Promise) {
-          // Handle promise case
-          htmlContent
-            .then((html: string) => {
-              analysisResults.innerHTML = html;
-            })
-            .catch((error: any) => {
-              log("Error parsing markdown in promise, displaying as plain text", error);
-              analysisResults.textContent = analysis;
-            });
-        }
+          analysisList.appendChild(analysisItem);
+        });
       } else {
-        // No markdown support, use plain text
-        log("Markdown parser not available, displaying as plain text");
-        analysisResults.textContent = analysis;
-      }
-
-      analysisResults.style.display = "block";
-    } catch (error) {
-      // Fallback to plain text if markdown parsing fails
-      log("Error parsing markdown, displaying as plain text");
-      analysisResults.textContent = analysis;
-      analysisResults.style.display = "block";
-    }
-  }
-
-  if (promptSection) {
-    promptSection.style.display = "none";
-
-    // Reset prompt buttons
-    const promptButtons = document.querySelector(
-      ".prompt-buttons"
-    ) as HTMLDivElement | null;
-    const chatLoader = document.getElementById("chat-loader") as HTMLDivElement | null;
-
-    if (promptButtons) {
-      promptButtons.style.display = "flex";
-
-      // Reset button text and state
-      const buttons = promptButtons.querySelectorAll(".prompt-button");
-      buttons.forEach((btn) => {
-        const btnElement = btn as HTMLButtonElement;
-        btnElement.disabled = false;
-
-        // Reset the text in case it was changed during analysis
-        const promptId = btnElement.dataset.promptId;
-        if (promptId === "describe") {
-          btnElement.textContent = "Describe content and extract text";
-        } else if (promptId === "extract-text") {
-          btnElement.textContent = "Extract text only";
-        } else if (promptId === "analyze-ui") {
-          btnElement.textContent = "Analyze UI design";
-        } else if (promptId === "identify-content") {
-          btnElement.textContent = "Identify page structure";
-        } else if (promptId === "seo-analysis") {
-          btnElement.textContent = "SEO analysis";
-        } else if (promptId === "content-type-json") {
-          btnElement.textContent = "Create content type json";
-        }
-      });
-    }
-
-    if (chatLoader) {
-      chatLoader.style.display = "none";
-
-      // Reset chat loader text
-      const loaderText = chatLoader.querySelector(".chat-loader-text");
-      if (loaderText) {
-        loaderText.textContent = "Analyzing content...";
+        // If no analyses, show the message inside the list container
+        analysisList.innerHTML = `<p class="no-analysis-message">No analysis results available for this capture.</p>`;
       }
     }
-  }
+  });
 
-  analysisInProgress = false;
+  return listItem;
 }
 
-// Handle analysis error
-function handleAnalysisError(errorMessage: string): void {
-  log("Handling analysis error:", errorMessage);
+function displayHistory(captures: Capture[]): void {
+  log("Displaying capture history UI");
+  const historyList = document.getElementById("history-list") as HTMLUListElement | null;
+  if (!historyList) return logError("History list element not found");
 
-  // Reset the UI on error
-  const promptSection = document.getElementById(
-    "prompt-section"
-  ) as HTMLDivElement | null;
+  historyList.innerHTML = ""; // Clear current list content
 
-  if (promptSection) {
-    promptSection.style.display = "block";
-
-    const promptButtons = document.querySelector(
-      ".prompt-buttons"
-    ) as HTMLDivElement | null;
-    const chatLoader = document.getElementById("chat-loader") as HTMLDivElement | null;
-
-    if (promptButtons && chatLoader) {
-      promptButtons.style.display = "flex";
-      chatLoader.style.display = "none";
-
-      // Reset chat loader text
-      const loaderText = chatLoader.querySelector(".chat-loader-text");
-      if (loaderText) {
-        loaderText.textContent = "Analyzing content...";
+  if (!captures || captures.length === 0) {
+    // Show placeholder if history is empty or undefined
+    const placeholder = document.createElement("li");
+    placeholder.style.padding = "20px";
+    placeholder.style.textAlign = "center";
+    placeholder.style.color = "var(--text-secondary)";
+    placeholder.textContent = "No captures yet.";
+    historyList.appendChild(placeholder);
+    log("History is empty or invalid, showing placeholder");
+  } else {
+    // Render each history item
+    captures.forEach((capture) => {
+      // Basic validation of capture object might be good here
+      if (capture && capture.id && capture.timestamp && capture.imageUrl) {
+        const listItem = renderHistoryItem(capture);
+        historyList.appendChild(listItem);
+      } else {
+        logError("Invalid capture object found in history:", capture);
       }
-    }
+    });
+    log(`Rendered ${captures.length} history items`);
   }
-
-  analysisInProgress = false;
 }
 
-// Helper function to get prompt text by ID
+function addCaptureToHistoryUI(capture: Capture): void {
+  log("Adding new capture to history UI");
+  const historyList = document.getElementById("history-list") as HTMLUListElement | null;
+  if (!historyList) return logError("History list element not found");
+
+  // Remove placeholder if it exists
+  const placeholder = historyList.querySelector('li[style*="padding: 20px"]');
+  if (placeholder) placeholder.remove();
+
+  // Render the new item
+  const listItem = renderHistoryItem(capture);
+
+  // Add to the top of the list
+  historyList.insertBefore(listItem, historyList.firstChild);
+  log(`Added capture ${capture.id} to the top of the history list UI`);
+
+  // Optional: Limit the number of items *displayed* in the DOM for performance,
+  // even if more are stored in memory/storage.
+  while (historyList.children.length > MAX_HISTORY_ITEMS) {
+    if (historyList.lastChild) {
+      // Check if lastChild exists
+      historyList.removeChild(historyList.lastChild);
+    } else {
+      break; // Should not happen, but prevents infinite loop
+    }
+  }
+}
+
+// --- Utility Functions ---
+
 function getPromptTextById(promptId: string): string {
-  switch (promptId) {
-    case "describe":
-      return "Describe what's in this image and extract any text content.";
-    case "extract-text":
-      return "Extract all text content from this image.";
-    case "analyze-ui":
-      return "Analyze this UI design and describe its components, layout, and functionality.";
-    case "identify-content":
-      return "Identify key content sections, headers, and navigation elements in this webpage.";
-    case "seo-analysis":
-      return "Analyze this webpage for SEO factors and suggest improvements.";
-    case "content-type-json":
-      return "Create content type json based on this content structure.";
-    default:
-      return "Describe what's in this image and extract any text content.";
-  }
-}
-
-// Helper function to properly highlight JSON without breaking nested structures
-function highlightJson(json: string): string {
-  try {
-    // First validate the JSON by parsing it
-    JSON.parse(json);
-
-    // Use a token-based approach instead of regex replacement
-    return (
-      json
-        // Handle strings with proper escaping of HTML entities
-        .replace(
-          /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
-          (match) => {
-            let cls = "number";
-            if (/^"/.test(match)) {
-              if (/:$/.test(match)) {
-                cls = "key";
-                // Only wrap the text in the key, not the colon
-                return `<span class="${cls}">${match.replace(":", "")}</span>:`;
-              } else {
-                cls = "string";
-              }
-            } else if (/true|false/.test(match)) {
-              cls = "boolean";
-            } else if (/null/.test(match)) {
-              cls = "null";
-            }
-            return `<span class="${cls}">${match}</span>`;
-          }
-        )
-    );
-  } catch (e) {
-    // If parsing fails, return the original string
-    return json;
-  }
+  const prompts: { [key: string]: string } = {
+    describe: "Describe the visual content of this image and extract any text present.",
+    "extract-text": "Extract all text from this image.",
+    "analyze-ui":
+      "Analyze the UI/UX design of this screenshot. Identify key components, assess layout, usability, and suggest improvements.",
+    "identify-content":
+      "Identify the main content sections or blocks visible in this image (e.g., header, footer, sidebar, article, product grid).",
+    "seo-analysis":
+      "Analyze this image from an SEO perspective. Suggest alt text, describe relevant content for surrounding text, and identify optimization opportunities if it were on a webpage.",
+    "content-type-json":
+      "Based on the content in this image, create a simple JSON structure representing a potential content type definition suitable for a headless CMS. Include relevant fields and estimate their types (e.g., text, image, number).",
+  };
+  return prompts[promptId] || prompts.describe; // Default to describe if ID is unknown
 }
