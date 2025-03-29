@@ -506,7 +506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "sendChatMessage":
-      handleChatMessage(message.message, sendResponse);
+      handleChatMessage(message.message, sendResponse, message.imageUrl);
       return true;
 
     default:
@@ -553,43 +553,48 @@ async function handleProcessSelection(
       action: "screenshotCaptured",
       data: screenshot,
       timestamp: new Date().toISOString(),
+      rect: rect, // Include the rectangle information for potential further processing
+      dpr: devicePixelRatio,
     });
 
     // Send success response immediately since we have the screenshot
     sendResponse({ status: "ok", imageUrl: screenshot });
 
-    // Try to process on server, but don't block the user flow
-    /* REMOVED BLOCK:
+    // Process the image on the server for future use (similar to what was commented out)
     try {
-      log("Attempting to process screenshot on server");
+      log("Processing screenshot on server for cropping");
 
       // Create form data with the full screenshot and selection coordinates
       const formData = new FormData();
 
-      // Convert base64 data URL to blob
-      const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
+      // Convert base64 data URL to blob for better server handling
+      const base64Data = screenshot.split(",")[1];
       const byteCharacters = atob(base64Data);
-      const byteArrays = [];
+      const byteNumbers = new Array(byteCharacters.length);
 
-      for (let offset = 0; offset < byteCharacters.length; offset += 512) {
-        const slice = byteCharacters.slice(offset, offset + 512);
-        const byteNumbers = new Array(slice.length);
-        for (let i = 0; i < slice.length; i++) {
-          byteNumbers[i] = slice.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        byteArrays.push(byteArray);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
       }
 
-      const blob = new Blob(byteArrays, { type: "image/png" });
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/png" });
 
-      // Add data to FormData
+      // Append image as blob instead of data URL
       formData.append("image", blob, "screenshot.png");
       formData.append("x", rect.x.toString());
       formData.append("y", rect.y.toString());
       formData.append("width", rect.width.toString());
       formData.append("height", rect.height.toString());
       formData.append("dpr", devicePixelRatio.toString());
+
+      // Add debugging logs
+      log("Sending image processing request with parameters:", {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        dpr: devicePixelRatio,
+      });
 
       // Send to the server for processing
       const response = await fetch(API_ENDPOINT, {
@@ -609,9 +614,9 @@ async function handleProcessSelection(
 
       log("Server processed image successfully, URL:", data.imageUrl);
 
-      // Send the processed image URL (optional enhancement, not critical)
+      // Send the processed image URL to replace the full screenshot
       chrome.runtime.sendMessage({
-        action: "screenshotCaptured",
+        action: "processedImageReady",
         data: data.imageUrl,
         timestamp: new Date().toISOString(),
       });
@@ -620,7 +625,6 @@ async function handleProcessSelection(
       logError("Server processing error (non-critical):", serverErr);
       // Don't show error to user since we already have a working screenshot
     }
-    */
   } catch (err) {
     // This is a critical error - screenshot capture failed
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -647,13 +651,35 @@ async function handleAnalyzeImage(
   try {
     log("Sending image to Anthropic for analysis");
 
+    // Create form data for the request
+    const formData = new FormData();
+
     // Use custom prompt if provided, otherwise use default
     const promptToUse = customPrompt || DEFAULT_PROMPT;
     log("Using prompt:", promptToUse);
 
-    // Create form data for the request
-    const formData = new FormData();
-    formData.append("imageUrl", imageUrl);
+    try {
+      // Convert the image URL to a blob for better server handling
+      const base64Data = imageUrl.split(",")[1];
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/png" });
+
+      // Append as blob with the field name 'image'
+      formData.append("image", blob, "analysis-image.png");
+      log("Image converted to blob for analysis");
+    } catch (error) {
+      logError("Error converting image to blob for analysis:", error);
+      // Fallback to directly sending the URL if conversion fails
+      formData.append("imageUrl", imageUrl);
+    }
+
     formData.append("prompt", promptToUse);
 
     // Send to the server for analysis
@@ -788,21 +814,52 @@ try {
 }
 
 // Handle chat message request
-async function handleChatMessage(message: string, sendResponse: Function): Promise<void> {
-  log("Handling chat message:", message);
+async function handleChatMessage(
+  message: string,
+  sendResponse: Function,
+  imageUrl: string | null = null
+): Promise<void> {
+  log("Handling chat message:", message, "with image:", !!imageUrl);
 
-  if (!message) {
-    logError("No message provided for chat");
-    sendResponse({ status: "error", message: "No message provided" });
+  if (!message && !imageUrl) {
+    logError("No message or image provided for chat");
+    sendResponse({ status: "error", message: "No message or image provided" });
     return;
   }
 
   try {
-    log("Sending message to chat endpoint");
+    log("Sending message to chat endpoint" + (imageUrl ? " with image" : ""));
 
-    // Create form data for the request
+    // *** Use the exact same approach as handleAnalyzeImage to ensure consistency ***
     const formData = new FormData();
-    formData.append("message", message);
+    formData.append("message", message || "");
+
+    if (imageUrl) {
+      log("Adding image URL to form data, length:", imageUrl.length);
+      // Log the first 100 chars of the image URL for debugging
+      log("Image URL preview:", imageUrl.substring(0, 100) + "...");
+
+      // For chat, it's safer to just pass the raw image URL rather than trying to convert it
+      formData.append("imageUrl", imageUrl);
+      log("Image URL added to form data directly");
+
+      // Note: We're skipping the blob conversion because it's causing errors
+      // The server should be able to handle the data URL directly
+    }
+
+    // Log form data entries for debugging
+    try {
+      log("Form data entries:");
+      for (const pair of (formData as any).entries()) {
+        if (pair[0] === "imageUrl" || pair[0] === "imageData") {
+          log(`- ${pair[0]}: (image data)`);
+        } else {
+          log(`- ${pair[0]}: ${pair[1]}`);
+        }
+      }
+    } catch (e) {
+      log("Could not enumerate form data entries:", e);
+    }
 
     // Send to the server with fetch for SSE support
     const response = await fetch(CHAT_ENDPOINT, {

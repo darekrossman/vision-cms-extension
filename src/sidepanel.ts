@@ -19,13 +19,18 @@ let selectedPromptId: string | null = null;
 let captureInProgress = false;
 let analysisInProgress = false;
 let latestImageUrl: string | null = null;
+let latestProcessedImageUrl: string | null = null; // Store the processed image URL
 let loadedHistory: Capture[] = []; // In-memory store for loaded history
 let currentCaptureForAnalysis: Capture | null = null; // Track capture being analyzed/loaded from history
+let chatAttachedImage: string | null = null; // Store the image URL for chat attachment
 
 // DOM Elements
 let chatInput: HTMLTextAreaElement | null = null;
 let chatMessages: HTMLDivElement | null = null;
 let chatSubmitButton: HTMLButtonElement | null = null;
+let chatImagePreview: HTMLDivElement | null = null;
+let chatImageThumbnail: HTMLImageElement | null = null;
+let chatImageRemoveButton: HTMLButtonElement | null = null;
 let isChatLoading = false;
 
 // --- Type Definitions ---
@@ -53,7 +58,10 @@ const MAX_HISTORY_ITEMS = 50;
 
 // Mirror PREDEFINED_PROMPTS from background script for UI labeling
 const PREDEFINED_PROMPTS = [
-  { id: "describe", text: "Describe what's in this image and extract any text content." },
+  {
+    id: "describe",
+    text: "Describe what's in this image and extract any text content.",
+  },
   { id: "extract-text", text: "Extract all text content from this image." },
   {
     id: "analyze-ui",
@@ -278,130 +286,67 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // --- Message Listener ---
 chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
-  log("Message received in sidepanel:", message);
+  log("Received message from extension:", message.action);
 
   switch (message.action) {
     case "screenshotCaptured":
-      if (message.data) {
-        await handleScreenshotCaptured(message.data);
-        sendResponse({ status: "success", received: true });
-      } else {
-        logError("screenshotCaptured message received without data");
-        sendResponse({ status: "error", message: "Missing data" });
-      }
-      // Indicate async response only if needed, but handleScreenshotCaptured is async
-      return true; // Keep channel open for async handleScreenshotCaptured
+      log("Screenshot captured message received");
+      // Convert the data URL to an object URL for better performance with large images
+      handleScreenshotCaptured(message.data);
+      break;
 
-    case "selectionModeUpdate":
-      log("Received selection mode update from background:", message.active);
-      isSelectionModeActive = message.active;
-      const toggleButton = document.getElementById(
-        "selection-toggle"
-      ) as HTMLButtonElement | null;
-      if (toggleButton) {
-        updateSelectionToggleState(isSelectionModeActive, toggleButton);
+    case "processedImageReady":
+      log("Processed image ready message received");
+      // Store the processed image URL for use in chat
+      if (typeof message.data === "string") {
+        latestProcessedImageUrl = message.data;
+
+        // If we have an attached image in chat that's the full screenshot,
+        // update it to use the processed version instead
+        if (
+          chatAttachedImage === latestImageUrl &&
+          latestProcessedImageUrl &&
+          chatImageThumbnail
+        ) {
+          log("Updating chat thumbnail to use processed image");
+          chatAttachedImage = latestProcessedImageUrl;
+          chatImageThumbnail.src = latestProcessedImageUrl;
+        }
       }
-      sendResponse({ status: "success" });
-      break; // Sync response is fine
+      break;
 
     case "analysisComplete":
       log("Analysis complete message received");
-      if (message.resultHtml && currentCaptureForAnalysis) {
-        const promptIdToUse = selectedPromptId || "unknown"; // Use the tracked selectedPromptId
-        const promptTextToUse =
-          promptIdToUse === "custom"
-            ? (
-                document.getElementById("custom-prompt-textarea") as HTMLTextAreaElement
-              )?.value?.trim() || "Custom prompt (text unavailable)"
-            : getPromptTextById(promptIdToUse) || "Predefined prompt (text unavailable)";
-
-        const newAnalysis: AnalysisResult = {
-          id: `analysis-${Date.now()}`, // Unique ID for this result
-          timestamp: Date.now(),
-          promptId: promptIdToUse,
-          promptText: promptTextToUse, // Store the actual prompt used
-          resultHtml: message.resultHtml,
-        };
-
-        // Display and save the new result
-        displayAnalysisResults(newAnalysis.resultHtml);
-        await updateCaptureResult(currentCaptureForAnalysis.id, newAnalysis);
-
-        // Update the history UI for this capture to reflect the new result
-        const historyItem = document.querySelector(
-          `li[data-capture-id="${currentCaptureForAnalysis.id}"]`
-        );
-        if (historyItem) {
-          // Re-render or update the analysis part of the history item
-          // Find or create the analysis results container within the history item
-          let analysisContainer = historyItem.querySelector<HTMLDivElement>(
-            ".analysis-results-history"
-          );
-          if (!analysisContainer) {
-            analysisContainer = document.createElement("div");
-            analysisContainer.className = "analysis-results-history";
-            // Find a suitable place to append it, e.g., after the image preview
-            const preview = historyItem.querySelector(".history-image-preview");
-            preview?.parentNode?.insertBefore(analysisContainer, preview.nextSibling);
-          }
-          // Add the new result (you might want a more sophisticated rendering)
-          const resultElement = document.createElement("div");
-          resultElement.className = "history-analysis-result";
-          resultElement.innerHTML = `<strong>${newAnalysis.promptId}:</strong> Completed`; // Simple indication
-          analysisContainer.appendChild(resultElement);
-        }
-
-        setAnalysisLoadingState(false);
-        analysisInProgress = false;
-        // Reset selected prompt after completion
-        selectedPromptId = null;
-      } else {
-        logError("Analysis complete message missing data or context", message);
-        setAnalysisLoadingState(false, "Error displaying result.");
-        analysisInProgress = false;
-      }
-      sendResponse({ status: "success" });
-      break; // Sync response ok
+      handleAnalysisCompleted(message.resultHtml);
+      break;
 
     case "analysisError":
-      logError("Analysis error message received:", message.error);
-      setAnalysisLoadingState(false, `Analysis failed: ${message.error}`);
-      analysisInProgress = false;
-      selectedPromptId = null; // Reset selected prompt on error
-      sendResponse({ status: "success" });
-      break; // Sync response ok
+      log("Analysis error message received");
+      handleAnalysisError(message.error);
+      break;
 
     case "chatResponse":
+      log("Chat response message received");
       hideThinkingIndicator();
-      if (message.content) {
-        addMessageToChat("assistant", message.content);
-      } else {
-        addMessageToChat(
-          "assistant",
-          "Sorry, I couldn't generate a response. Please try again."
-        );
-      }
-      sendResponse({ status: "success" });
+      addMessageToChat("assistant", message.content);
       break;
 
     case "chatError":
+      log("Chat error message received");
       hideThinkingIndicator();
       addMessageToChat(
         "assistant",
         `Error: ${message.error || "Unknown error occurred"}`
       );
-      sendResponse({ status: "success" });
       break;
 
     case "chatToolUsage":
+      log("Chat tool usage message received");
       displayToolUsage(message.toolInfo);
-      sendResponse({ status: "success" });
       break;
 
     default:
-      log("Unknown message action received:", message.action);
-      sendResponse({ status: "ignored", reason: "Unknown action" });
-      break; // Sync response is fine
+      log("Unhandled message received:", message);
   }
 
   // Default return false if no async operation requires keeping the channel open
@@ -429,6 +374,9 @@ function setupTabs(): void {
         if (!tabId) return logError("No tab ID found on clicked button");
         log(`Tab button clicked: ${tabId}`);
 
+        // Check if this is the chat tab and we have a recent image
+        const isChatTab = tabId === "content-tab-4";
+
         tabButtons.forEach((btn) => btn.classList.remove("active"));
         button.classList.add("active");
 
@@ -437,6 +385,17 @@ function setupTabs(): void {
         if (selectedTabContent) {
           selectedTabContent.classList.add("active");
           log(`Activated tab content: ${tabId}`);
+
+          // Handle the special case: switching to chat tab with a recent image
+          if (isChatTab && latestImageUrl && !chatAttachedImage) {
+            // Ask if the user wants to attach the image to chat
+            const shouldAttach = confirm(
+              "Would you like to attach the most recent screenshot to your chat?"
+            );
+            if (shouldAttach) {
+              attachImageToChat(latestImageUrl);
+            }
+          }
         } else {
           logError(`Tab content not found: ${tabId}`);
         }
@@ -574,8 +533,21 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
   captureInProgress = false; // Reset capture flag
   currentCaptureForAnalysis = null; // Reset context, this is a NEW capture
 
-  displayImage(dataUrl);
-  showPromptSection(); // Always show prompts for a new capture
+  // Store the latest image URL for potential chat attachment
+  latestImageUrl = dataUrl;
+
+  // Check if we're on the chat tab (tab-4)
+  const chatTab = document.getElementById("tab-4");
+  const isChatTabActive = chatTab?.classList.contains("active");
+
+  if (isChatTabActive) {
+    // If we're on the chat tab, attach the image to the chat
+    attachImageToChat(dataUrl);
+  } else {
+    // Regular flow for analysis tab
+    displayImage(dataUrl);
+    showPromptSection(); // Always show prompts for a new capture
+  }
 
   try {
     // Save the capture *without* analysis results initially
@@ -584,6 +556,24 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
     addCaptureToHistoryUI(newCapture); // Add to UI list
   } catch (error) {
     logError("Failed to save or update history UI for new capture:", error);
+  }
+}
+
+// Function to attach image to chat
+function attachImageToChat(imageUrl: string): void {
+  log("Attaching image to chat");
+
+  // Use the processed image if available, otherwise use the original
+  if (imageUrl === latestImageUrl && latestProcessedImageUrl) {
+    log("Using processed image for chat attachment");
+    chatAttachedImage = latestProcessedImageUrl;
+  } else {
+    chatAttachedImage = imageUrl;
+  }
+
+  if (chatImagePreview && chatImageThumbnail && chatAttachedImage) {
+    chatImageThumbnail.src = chatAttachedImage;
+    chatImagePreview.style.display = "flex";
   }
 }
 
@@ -920,8 +910,24 @@ function setupChat(): void {
     chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
     chatMessages = document.getElementById("chat-messages") as HTMLDivElement | null;
     chatSubmitButton = document.getElementById("chat-submit") as HTMLButtonElement | null;
+    chatImagePreview = document.getElementById(
+      "chat-image-preview"
+    ) as HTMLDivElement | null;
+    chatImageThumbnail = document.getElementById(
+      "chat-image-thumbnail"
+    ) as HTMLImageElement | null;
+    chatImageRemoveButton = document.getElementById(
+      "chat-image-remove"
+    ) as HTMLButtonElement | null;
 
-    if (!chatInput || !chatMessages || !chatSubmitButton) {
+    if (
+      !chatInput ||
+      !chatMessages ||
+      !chatSubmitButton ||
+      !chatImagePreview ||
+      !chatImageThumbnail ||
+      !chatImageRemoveButton
+    ) {
       logError("Chat UI elements not found");
       return;
     }
@@ -937,6 +943,15 @@ function setupChat(): void {
       }
     });
 
+    // Add event listener for the remove button
+    chatImageRemoveButton.addEventListener("click", () => {
+      chatAttachedImage = null;
+      if (chatImagePreview && chatImageThumbnail) {
+        chatImagePreview.style.display = "none";
+        chatImageThumbnail.src = "";
+      }
+    });
+
     log("Chat functionality setup complete");
   } catch (error) {
     logError("Error setting up chat functionality:", error);
@@ -947,24 +962,42 @@ function submitChatMessage(): void {
   if (!chatInput || !chatMessages || !chatSubmitButton || isChatLoading) return;
 
   const message = chatInput.value.trim();
-  if (!message) return;
+  const hasImage = chatAttachedImage !== null;
 
-  log("Submitting chat message:", message);
+  if (!message && !hasImage) return; // Don't send empty messages without an image
 
-  // Add user message to chat
-  addMessageToChat("user", message);
+  log("Submitting chat message:", message, "with image:", hasImage);
+
+  // Add user message to chat with the currently attached image
+  addMessageToChat("user", message, chatAttachedImage);
 
   // Clear input
   chatInput.value = "";
 
+  // Hide and clear the image preview
+  if (chatImagePreview && chatImageThumbnail && hasImage) {
+    chatImagePreview.style.display = "none";
+    // Don't clear the src yet, we need it for the message
+  }
+
   // Show thinking indicator
   showThinkingIndicator();
 
-  // Send message to server
-  sendChatMessage(message);
+  // Get the image to send - prefer the processed image if it's the latest one
+  const imageToSend = chatAttachedImage;
+
+  // Send message to server with image (if any)
+  sendChatMessage(message, imageToSend);
+
+  // Clear the attached image after sending
+  chatAttachedImage = null;
 }
 
-function addMessageToChat(role: "user" | "assistant", content: string): void {
+function addMessageToChat(
+  role: "user" | "assistant",
+  content: string,
+  imageUrl: string | null = null
+): void {
   if (!chatMessages) return;
 
   const messageElement = document.createElement("div");
@@ -973,12 +1006,31 @@ function addMessageToChat(role: "user" | "assistant", content: string): void {
   const contentElement = document.createElement("div");
   contentElement.className = "message-content";
 
-  // If we have markdown support and this is an assistant message, render as markdown
-  if (markedModule && role === "assistant") {
-    contentElement.innerHTML = markedModule.marked(content);
-  } else {
-    // Otherwise just set text content with line breaks preserved
-    contentElement.textContent = content;
+  // If there's an image and this is a user message, add it before the text
+  if (imageUrl && role === "user") {
+    const imgElement = document.createElement("img");
+    imgElement.src = imageUrl;
+    imgElement.className = "chat-message-image";
+    imgElement.alt = "Attached image";
+    contentElement.appendChild(imgElement);
+
+    // Add a line break if there's also text content
+    if (content) {
+      const breakElement = document.createElement("br");
+      contentElement.appendChild(breakElement);
+    }
+  }
+
+  // Add the text content
+  if (content) {
+    // If we have markdown support and this is an assistant message, render as markdown
+    if (markedModule && role === "assistant") {
+      contentElement.innerHTML += markedModule.marked(content);
+    } else {
+      // Otherwise just set text content with line breaks preserved
+      const textNode = document.createTextNode(content);
+      contentElement.appendChild(textNode);
+    }
   }
 
   messageElement.appendChild(contentElement);
@@ -1027,13 +1079,17 @@ function hideThinkingIndicator(): void {
   }
 }
 
-async function sendChatMessage(message: string): Promise<void> {
+async function sendChatMessage(
+  message: string,
+  imageUrl: string | null = null
+): Promise<void> {
   try {
-    log("Sending chat message to background script");
+    log("Sending chat message to background script" + (imageUrl ? " with image" : ""));
 
     const response = await chrome.runtime.sendMessage({
       action: "sendChatMessage",
       message,
+      imageUrl,
       source: "sidePanel",
     });
 
@@ -1135,7 +1191,46 @@ function displayToolUsage(toolInfo: {
   }
 
   chatMessages.scrollTop = chatMessages.scrollHeight;
+}
 
-  // For completed/failed tools, don't affect the thinking indicator
-  // It should remain visible as long as the overall process is ongoing
+// Add these helper functions to handle analysis and errors
+function handleAnalysisCompleted(resultHtml: string): void {
+  log("Handling completed analysis");
+  if (currentCaptureForAnalysis) {
+    const promptIdToUse = selectedPromptId || "unknown"; // Use the tracked selectedPromptId
+    const promptTextToUse =
+      promptIdToUse === "custom"
+        ? (
+            document.getElementById("custom-prompt-textarea") as HTMLTextAreaElement
+          )?.value?.trim() || "Custom prompt (text unavailable)"
+        : getPromptTextById(promptIdToUse) || "Predefined prompt (text unavailable)";
+
+    const newAnalysis: AnalysisResult = {
+      id: `analysis-${Date.now()}`, // Unique ID for this result
+      timestamp: Date.now(),
+      promptId: promptIdToUse,
+      promptText: promptTextToUse, // Store the actual prompt used
+      resultHtml: resultHtml,
+    };
+
+    // Display and save the new result
+    displayAnalysisResults(newAnalysis.resultHtml);
+    updateCaptureResult(currentCaptureForAnalysis.id, newAnalysis);
+
+    setAnalysisLoadingState(false);
+    analysisInProgress = false;
+    // Reset selected prompt after completion
+    selectedPromptId = null;
+  } else {
+    logError("Analysis complete but missing context");
+    setAnalysisLoadingState(false, "Error displaying result.");
+    analysisInProgress = false;
+  }
+}
+
+function handleAnalysisError(error: string): void {
+  logError("Analysis error:", error);
+  setAnalysisLoadingState(false, `Analysis failed: ${error}`);
+  analysisInProgress = false;
+  selectedPromptId = null; // Reset selected prompt on error
 }
