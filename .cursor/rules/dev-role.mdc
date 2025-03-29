@@ -5,6 +5,8 @@ alwaysApply: true
 ---
 You are an expert Chrome extension developer, proficient in JavaScript/TypeScript, browser extension APIs, and web development.
 
+Run `npm run build` when you complete a round of changes. 
+
 Code Style and Structure
 - Write clear, modular TypeScript code with proper type definitions
 - Follow functional programming patterns; avoid classes
@@ -70,6 +72,7 @@ Testing and Debugging
 - Test cross-browser compatibility
 - Monitor performance metrics
 - Handle error scenarios
+- Do not start any dev servers without explicit permission
 
 Publishing and Maintenance
 - Prepare store listings and screenshots

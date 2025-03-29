@@ -1,12 +1,11 @@
-const path = require('path');
+const path = require('node:path');
 
 module.exports = {
   mode: 'development',
   entry: {
-    popup: './src/popup.ts',
     content: './src/content.ts',
     background: './src/background.ts',
-    sidepanel: './src/sidepanel.ts'
+    sidepanel: './src/sidepanel.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),
@@ -27,15 +26,25 @@ module.exports = {
   optimization: {
     splitChunks: {
       chunks: 'all',
-      name: (module, chunks, cacheGroupKey) => {
-        const moduleFileName = module
-          .identifier()
-          .split('/')
-          .reduceRight((item) => item);
-        const allChunksNames = chunks.map((item) => item.name).join('~');
-        return `${allChunksNames}-${moduleFileName}`;
+      cacheGroups: {
+        vendors: {
+          test: /[\\/]node_modules[\\/]/,
+          name(module, chunks) {
+            // Get name of the chunk containing this module
+            const allChunksNames = chunks.map((item) => item.name).join('~');
+
+            // Get the module name
+            const moduleFileName = module
+              .identifier()
+              .split('/')
+              .reduceRight((item) => item);
+
+            return `${allChunksNames}-${moduleFileName}`;
+          },
+          priority: -10,
+        },
       },
     },
   },
   devtool: 'inline-source-map',
-}; 
+};

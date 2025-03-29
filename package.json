@@ -9,6 +9,9 @@
     "prebuild": "npm run generate-icons",
     "build": "webpack --config webpack.config.js && npm run copy-assets",
     "watch": "webpack --config webpack.config.js --watch",
+    "lint": "biome lint .",
+    "format": "biome format . --write",
+    "check": "biome check --apply-unsafe .",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -20,6 +23,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@biomejs/biome": "1.5.3",
     "@types/chrome": "^0.0.260",
     "@types/html2canvas": "^1.0.0",
     "@types/node": "^20.11.19",
@@ -32,6 +36,7 @@
   },
   "dependencies": {
     "@types/html2canvas": "^0.5.35",
+    "@types/marked": "^5.0.2",
     "html2canvas": "^1.4.1",
     "marked": "^15.0.7",
     "multer": "^1.4.5-lts.2"

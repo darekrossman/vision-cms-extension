@@ -117,9 +117,11 @@ function createOverlay(): HTMLDivElement {
   overlay.style.width = "100%";
   overlay.style.height = "100%";
   overlay.style.zIndex = "2147483647";
-  overlay.style.pointerEvents = "none"; // Let mouse events pass through
-  overlay.style.display = "none";
+  overlay.style.pointerEvents = "auto"; // Capture ALL mouse events
+  overlay.style.cursor = "crosshair"; // Show crosshair cursor
+  overlay.style.display = "block"; // Show overlay immediately
   overlay.style.boxSizing = "border-box";
+  overlay.style.backgroundColor = "rgba(0, 0, 0, 0.0)"; // should be transparent
 
   // Create the four panels that will form our overlay
   // These will be positioned to leave a "hole" where the selection is
@@ -128,7 +130,8 @@ function createOverlay(): HTMLDivElement {
     panel.className = `vision-cms-overlay-panel vision-cms-overlay-${position}`;
     panel.style.position = "absolute";
     panel.style.backgroundColor = "rgba(0, 0, 0, 0.5)"; // Dimmed background
-    panel.style.pointerEvents = "none";
+    panel.style.display = "none"; // Hide panels initially until selection starts
+    panel.style.pointerEvents = "none"; // Let events go to the parent overlay
     panel.style.overflow = "hidden";
     return panel;
   });
@@ -143,6 +146,7 @@ function createOverlay(): HTMLDivElement {
   selectionBorder.style.boxSizing = "border-box";
   selectionBorder.style.border = "1px dashed white"; // White dashed border
   selectionBorder.style.pointerEvents = "none";
+  selectionBorder.style.display = "none"; // Hide initially
   overlay.appendChild(selectionBorder);
 
   document.body.appendChild(overlay);
@@ -165,8 +169,18 @@ function updateOverlay(e: MouseEvent): void {
   const adjustedWidth = Math.max(width, minSize);
   const adjustedHeight = Math.max(height, minSize);
 
-  // Show the overlay if it's hidden
-  selectionOverlay.style.display = "block";
+  // Make the panels visible when selection starts
+  selectionOverlay.querySelectorAll(".vision-cms-overlay-panel").forEach((panel) => {
+    (panel as HTMLElement).style.display = "block";
+  });
+
+  // Show the selection border
+  const selectionBorder = selectionOverlay.querySelector(
+    ".vision-cms-selection-border"
+  ) as HTMLElement;
+  if (selectionBorder) {
+    selectionBorder.style.display = "block";
+  }
 
   // Update the positions of the four overlay panels
   // TOP panel (full width, from top of screen to top of selection)
@@ -214,10 +228,8 @@ function updateOverlay(e: MouseEvent): void {
   }
 
   // Update the selection border
-  const selectionBorder = selectionOverlay.querySelector(
-    ".vision-cms-selection-border"
-  ) as HTMLElement;
   if (selectionBorder) {
+    selectionBorder.style.display = "block";
     selectionBorder.style.top = `${y}px`;
     selectionBorder.style.left = `${x}px`;
     selectionBorder.style.width = `${adjustedWidth}px`;
@@ -326,11 +338,26 @@ function setupSelectionEventListeners(): void {
     if (width > 10 && height > 10) {
       processSelection(selectedRect);
     } else {
-      // Selection too small, just clean up this selection (not exit selection mode)
-      console.log("Selection too small, removing just this selection");
+      // Selection too small, reset to clean overlay state instead of removing
+      console.log("Selection too small, resetting overlay");
+
       if (selectionOverlay) {
-        selectionOverlay.remove();
-        selectionOverlay = null;
+        // Hide selection border
+        const selectionBorder = selectionOverlay.querySelector(
+          ".vision-cms-selection-border"
+        ) as HTMLElement;
+        if (selectionBorder) {
+          selectionBorder.style.display = "none";
+        }
+
+        // Hide all panels but keep overlay
+        const panels = selectionOverlay.querySelectorAll(".vision-cms-overlay-panel");
+        panels.forEach((panel) => {
+          (panel as HTMLElement).style.display = "none";
+        });
+
+        // Reset background color
+        selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0.1)";
       }
       startPoint = null;
     }
@@ -385,6 +412,7 @@ function cancelSelection(): void {
     return;
   }
 
+  // Remove the overlay completely
   if (selectionOverlay) {
     selectionOverlay.remove();
     selectionOverlay = null;
@@ -392,6 +420,7 @@ function cancelSelection(): void {
 
   startPoint = null;
   isSelecting = false;
+  selectedRect = null;
 
   // Remove selection styles
   document.body.classList.remove("vision-cms-selecting");
@@ -421,9 +450,11 @@ async function processSelection(rect: DOMRect): Promise<void> {
       })
       .catch((err) => console.error("Failed to send processing started message:", err));
 
-    // Hide the selection border to ensure it's not in the captured image
+    // Reset the overlay to a clean state instead of hiding it
     if (selectionOverlay) {
-      // Make sure all overlay elements are invisible for the capture
+      // Clear all selection-specific UI elements but keep the overlay active
+
+      // Hide selection border
       const selectionBorder = selectionOverlay.querySelector(
         ".vision-cms-selection-border"
       ) as HTMLElement;
@@ -431,14 +462,14 @@ async function processSelection(rect: DOMRect): Promise<void> {
         selectionBorder.style.display = "none";
       }
 
-      // Set all panels to transparent
+      // Hide all panels but keep overlay
       const panels = selectionOverlay.querySelectorAll(".vision-cms-overlay-panel");
       panels.forEach((panel) => {
-        (panel as HTMLElement).style.backgroundColor = "transparent";
+        (panel as HTMLElement).style.display = "none";
       });
 
-      // Ensure overlay is transparent for capture
-      selectionOverlay.style.background = "transparent";
+      // Ensure overlay remains visible with a light background to show it's still active
+      selectionOverlay.style.backgroundColor = "rgba(0, 0, 0, 0.1)";
     }
 
     // Allow a brief moment for the UI to update before capturing
@@ -457,22 +488,12 @@ async function processSelection(rect: DOMRect): Promise<void> {
 
     console.log("Background script response:", response);
 
-    // Remove the selection overlay completely
-    if (selectionOverlay) {
-      selectionOverlay.remove();
-      selectionOverlay = null;
-    }
+    // Reset startPoint but keep the overlay active
     startPoint = null;
   } catch (error) {
     console.error("Processing failed:", error);
 
-    // Remove selection overlay even on error
-    if (selectionOverlay) {
-      selectionOverlay.remove();
-      selectionOverlay = null;
-    }
     startPoint = null;
-
     throw error;
   }
 }

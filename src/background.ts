@@ -7,6 +7,28 @@ const ANALYSIS_ENDPOINT = "http://localhost:3000/analyze-image";
 // Default prompt for image analysis
 const DEFAULT_PROMPT = "Describe what's in this image and extract any text content.";
 
+// Predefined prompts for image analysis
+const PREDEFINED_PROMPTS = [
+  { id: "describe", text: "Describe what's in this image and extract any text content." },
+  { id: "extract-text", text: "Extract all text content from this image." },
+  {
+    id: "analyze-ui",
+    text: "Analyze this UI design and describe its components, layout, and functionality.",
+  },
+  {
+    id: "identify-content",
+    text: "Identify key content sections, headers, and navigation elements in this webpage.",
+  },
+  {
+    id: "seo-analysis",
+    text: "Analyze this webpage for SEO factors and suggest improvements.",
+  },
+  {
+    id: "content-type-json",
+    text: "Create content type json based on this content structure.",
+  },
+];
+
 // State tracking
 let isActive = true;
 
@@ -158,7 +180,7 @@ async function ensureContentScriptsInjected(tabId: number): Promise<void> {
 
 // Handle messages from content script or side panel
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  const isFromContentScript = sender.tab && sender.tab.id;
+  const isFromContentScript = sender.tab?.id;
   const isFromSidePanel = message.source === "sidePanel";
 
   log(
@@ -264,7 +286,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "analyzeImage":
-      handleAnalyzeImage(message.imageUrl, sendResponse);
+      handleAnalyzeImage(message.imageUrl, sendResponse, message.customPrompt);
       return true;
 
     default:
@@ -302,71 +324,83 @@ async function handleProcessSelection(
     // Use the result, defaulting to 1 if undefined
     const devicePixelRatio = result ?? 1;
 
-    log("Screenshot captured, uploading to server with selection data");
+    log("Screenshot captured successfully");
 
-    // Create form data with the full screenshot and selection coordinates
-    const formData = new FormData();
-
-    // Convert base64 data URL to blob
-    const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
-    const byteCharacters = atob(base64Data);
-    const byteArrays = [];
-
-    for (let offset = 0; offset < byteCharacters.length; offset += 512) {
-      const slice = byteCharacters.slice(offset, offset + 512);
-      const byteNumbers = new Array(slice.length);
-      for (let i = 0; i < slice.length; i++) {
-        byteNumbers[i] = slice.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      byteArrays.push(byteArray);
-    }
-
-    const blob = new Blob(byteArrays, { type: "image/png" });
-
-    // Add data to FormData
-    formData.append("image", blob, "screenshot.png");
-    formData.append("x", rect.x.toString());
-    formData.append("y", rect.y.toString());
-    formData.append("width", rect.width.toString());
-    formData.append("height", rect.height.toString());
-    formData.append("dpr", devicePixelRatio.toString());
-
-    // Send to the server for processing
-    const response = await fetch(API_ENDPOINT, {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Server error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-
-    if (!data.imageUrl) {
-      throw new Error("No image URL in server response");
-    }
-
-    log("Server processed image successfully, URL:", data.imageUrl);
-
-    // Notify the side panel of the successful image processing
+    // First send the raw screenshot to the sidepanel immediately
     chrome.runtime.sendMessage({
-      action: "imageProcessed",
-      imageUrl: data.imageUrl,
+      action: "screenshotCaptured",
+      data: screenshot,
       timestamp: new Date().toISOString(),
     });
 
-    sendResponse({ status: "ok", imageUrl: data.imageUrl });
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    logError("Error processing selection:", errorMessage);
+    // Send success response immediately since we have the screenshot
+    sendResponse({ status: "ok", imageUrl: screenshot });
 
-    // Notify the side panel of the error
-    chrome.runtime.sendMessage({
-      action: "processingError",
-      error: errorMessage,
-    });
+    // Try to process on server, but don't block the user flow
+    try {
+      log("Attempting to process screenshot on server");
+
+      // Create form data with the full screenshot and selection coordinates
+      const formData = new FormData();
+
+      // Convert base64 data URL to blob
+      const base64Data = screenshot.replace(/^data:image\/png;base64,/, "");
+      const byteCharacters = atob(base64Data);
+      const byteArrays = [];
+
+      for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+        const slice = byteCharacters.slice(offset, offset + 512);
+        const byteNumbers = new Array(slice.length);
+        for (let i = 0; i < slice.length; i++) {
+          byteNumbers[i] = slice.charCodeAt(i);
+        }
+        const byteArray = new Uint8Array(byteNumbers);
+        byteArrays.push(byteArray);
+      }
+
+      const blob = new Blob(byteArrays, { type: "image/png" });
+
+      // Add data to FormData
+      formData.append("image", blob, "screenshot.png");
+      formData.append("x", rect.x.toString());
+      formData.append("y", rect.y.toString());
+      formData.append("width", rect.width.toString());
+      formData.append("height", rect.height.toString());
+      formData.append("dpr", devicePixelRatio.toString());
+
+      // Send to the server for processing
+      const response = await fetch(API_ENDPOINT, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      if (!data.imageUrl) {
+        throw new Error("No image URL in server response");
+      }
+
+      log("Server processed image successfully, URL:", data.imageUrl);
+
+      // Send the processed image URL (optional enhancement, not critical)
+      chrome.runtime.sendMessage({
+        action: "screenshotCaptured",
+        data: data.imageUrl,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (serverErr) {
+      // Log server processing error but don't show to user since we already have the screenshot
+      logError("Server processing error (non-critical):", serverErr);
+      // Don't show error to user since we already have a working screenshot
+    }
+  } catch (err) {
+    // This is a critical error - screenshot capture failed
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logError("Critical error - Failed to capture screenshot:", errorMessage);
 
     sendResponse({ status: "error", message: errorMessage });
   }
@@ -375,7 +409,8 @@ async function handleProcessSelection(
 // Handle image analysis request
 async function handleAnalyzeImage(
   imageUrl: string,
-  sendResponse: Function
+  sendResponse: Function,
+  customPrompt?: string
 ): Promise<void> {
   log("Handling analyzeImage request for image URL:", imageUrl);
 
@@ -388,10 +423,14 @@ async function handleAnalyzeImage(
   try {
     log("Sending image to Anthropic for analysis");
 
+    // Use custom prompt if provided, otherwise use default
+    const promptToUse = customPrompt || DEFAULT_PROMPT;
+    log("Using prompt:", promptToUse);
+
     // Create form data for the request
     const formData = new FormData();
     formData.append("imageUrl", imageUrl);
-    formData.append("prompt", DEFAULT_PROMPT);
+    formData.append("prompt", promptToUse);
 
     // Send to the server for analysis
     const response = await fetch(ANALYSIS_ENDPOINT, {
@@ -418,7 +457,7 @@ async function handleAnalyzeImage(
 
     // Notify the side panel of the successful analysis
     chrome.runtime.sendMessage({
-      action: "analysisComplete",
+      action: "analysisDone",
       analysis: analysisContent,
       timestamp: new Date().toISOString(),
     });
@@ -431,21 +470,10 @@ async function handleAnalyzeImage(
     // Notify the side panel of the error
     chrome.runtime.sendMessage({
       action: "analysisError",
-      error: errorMessage,
+      message: errorMessage,
     });
 
     sendResponse({ status: "error", message: errorMessage });
-  }
-}
-
-// Safe way to notify popup without causing errors if it's not open
-function notifyPopup(message: Record<string, any>): void {
-  try {
-    chrome.runtime.sendMessage(message).catch(() => {
-      // Ignore errors - popup is likely just not open
-    });
-  } catch (error) {
-    // Ignore errors - popup is likely just not open
   }
 }
 
