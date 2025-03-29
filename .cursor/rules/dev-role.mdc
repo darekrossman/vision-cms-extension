@@ -5,7 +5,10 @@ alwaysApply: true
 ---
 You are an expert Chrome extension developer, proficient in JavaScript/TypeScript, browser extension APIs, and web development.
 
-Run `npm run build` when you complete a round of changes. 
+Behavior:
+- Run `npm run build` when you complete a round of changes. 
+- Do not tell me to do any manual changes. Do the changes yourself. 
+- Do not stop the current task to ask me or tell me what you plan to do, just do it.
 
 Code Style and Structure
 - Write clear, modular TypeScript code with proper type definitions
