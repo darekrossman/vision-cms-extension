@@ -36,6 +36,7 @@
     "webpack-cli": "^5.1.4"
   },
   "dependencies": {
+    "@contentstack/management": "^1.19.5",
     "@types/html2canvas": "^0.5.35",
     "@types/marked": "^5.0.2",
     "html2canvas": "^1.4.1",

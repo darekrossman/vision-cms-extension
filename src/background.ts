@@ -3,6 +3,7 @@ import { createBackgroundLogger, generateFilename } from "./utils";
 // Configuration
 const API_ENDPOINT = "http://localhost:3000/process-image";
 const ANALYSIS_ENDPOINT = "http://localhost:3000/analyze-image";
+const CHAT_ENDPOINT = "http://localhost:3000/chat";
 
 // Default prompt for image analysis
 const DEFAULT_PROMPT = "Describe what's in this image and extract any text content.";
@@ -504,6 +505,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       break;
 
+    case "sendChatMessage":
+      handleChatMessage(message.message, sendResponse);
+      return true;
+
     default:
       // Enhanced logging for unknown actions
       log("Unknown message action:", message.action, "from", messageSource);
@@ -554,6 +559,7 @@ async function handleProcessSelection(
     sendResponse({ status: "ok", imageUrl: screenshot });
 
     // Try to process on server, but don't block the user flow
+    /* REMOVED BLOCK:
     try {
       log("Attempting to process screenshot on server");
 
@@ -614,6 +620,7 @@ async function handleProcessSelection(
       logError("Server processing error (non-critical):", serverErr);
       // Don't show error to user since we already have a working screenshot
     }
+    */
   } catch (err) {
     // This is a critical error - screenshot capture failed
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -778,4 +785,62 @@ try {
   }
 } catch (error) {
   logError("Error initializing alarms:", error);
+}
+
+// Handle chat message request
+async function handleChatMessage(message: string, sendResponse: Function): Promise<void> {
+  log("Handling chat message:", message);
+
+  if (!message) {
+    logError("No message provided for chat");
+    sendResponse({ status: "error", message: "No message provided" });
+    return;
+  }
+
+  try {
+    log("Sending message to chat endpoint");
+
+    // Create form data for the request
+    const formData = new FormData();
+    formData.append("message", message);
+
+    // Send to the server for processing
+    const response = await fetch(CHAT_ENDPOINT, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.success) {
+      throw new Error(data.error || "Unknown error occurred");
+    }
+
+    const chatContent = data.content || "";
+
+    log("Chat response received successfully");
+
+    // Notify the side panel of the successful chat response
+    chrome.runtime.sendMessage({
+      action: "chatResponse",
+      content: chatContent,
+    });
+
+    sendResponse({ status: "ok" });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logError("Error processing chat message:", errorMessage);
+
+    // Notify the side panel of the error
+    chrome.runtime.sendMessage({
+      action: "chatError",
+      error: errorMessage,
+    });
+
+    sendResponse({ status: "error", message: errorMessage });
+  }
 }

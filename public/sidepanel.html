@@ -501,6 +501,139 @@
     .header .icon-button.active .cancel-icon {
       display: inline;
     }
+    
+    /* Chat tab styles */
+    .chat-container {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 124px);
+      background-color: var(--background-color);
+    }
+    
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    
+    .chat-message {
+      display: flex;
+      max-width: 85%;
+    }
+    
+    .chat-message.user {
+      align-self: flex-end;
+    }
+    
+    .chat-message.assistant {
+      align-self: flex-start;
+    }
+    
+    .message-content {
+      padding: 12px 16px;
+      border-radius: 18px;
+      font-size: 14px;
+      line-height: 1.5;
+      box-shadow: var(--shadow-sm);
+    }
+    
+    .chat-message.user .message-content {
+      background-color: var(--primary-color);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+    
+    .chat-message.assistant .message-content {
+      background-color: var(--surface-color);
+      color: var(--text-primary);
+      border: 1px solid var(--border-color);
+      border-bottom-left-radius: 4px;
+    }
+    
+    .chat-input-container {
+      display: flex;
+      padding: 16px;
+      background-color: var(--surface-color);
+      border-top: 1px solid var(--border-color);
+      gap: 10px;
+      align-items: flex-end;
+    }
+    
+    .chat-input {
+      flex: 1;
+      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius);
+      padding: 10px 14px;
+      font-family: inherit;
+      font-size: 14px;
+      resize: none;
+      max-height: 120px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    
+    .chat-input:focus {
+      border-color: var(--primary-color);
+    }
+    
+    .chat-submit-button {
+      background-color: var(--primary-color);
+      color: white;
+      border: none;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+    
+    .chat-submit-button:hover {
+      background-color: var(--primary-hover);
+    }
+    
+    .chat-submit-button:disabled {
+      background-color: #d1d5db;
+      cursor: not-allowed;
+    }
+    
+    .chat-submit-button svg {
+      width: 20px;
+      height: 20px;
+    }
+    
+    .chat-thinking {
+      display: flex;
+      gap: 4px;
+      padding: 8px 16px;
+      align-self: flex-start;
+      border-radius: 18px;
+      background-color: var(--surface-color);
+      border: 1px solid var(--border-color);
+      margin-top: 8px;
+    }
+    
+    .chat-thinking-dot {
+      width: 8px;
+      height: 8px;
+      background-color: var(--text-secondary);
+      border-radius: 50%;
+      opacity: 0.6;
+      animation: pulse 1.4s infinite ease-in-out;
+    }
+    
+    .chat-thinking-dot:nth-child(2) {
+      animation-delay: 0.2s;
+    }
+    
+    .chat-thinking-dot:nth-child(3) {
+      animation-delay: 0.4s;
+    }
   </style>
 </head>
 <body>
@@ -522,6 +655,7 @@
     <button id="tab-1" class="tab-button active" data-tab="content-tab-1">Analysis</button>
     <button id="tab-2" class="tab-button" data-tab="content-tab-2">History</button>
     <button id="tab-3" class="tab-button" data-tab="content-tab-3">Settings</button>
+    <button id="tab-4" class="tab-button" data-tab="content-tab-4">Chat</button>
   </div>
   
   <div id="content-tab-1" class="tab-content active">
@@ -540,6 +674,15 @@
           <button class="prompt-button" data-prompt-id="seo-analysis">SEO analysis</button>
           <button class="prompt-button" data-prompt-id="content-type-json">Create content type json</button>
         </div>
+        
+        <!-- Custom Prompt Area -->
+        <div class="custom-prompt-area" style="margin-top: 16px;">
+          <h3>Or enter a custom prompt:</h3>
+          <textarea id="custom-prompt-textarea" placeholder="Enter custom prompt here..." rows="4" style="width: 100%; padding: 10px; margin-bottom: 8px; border-radius: var(--border-radius); border: 1px solid var(--border-color); resize: vertical;"></textarea>
+          <button id="analyze-custom-prompt-button" class="prompt-button custom-prompt-button" style="background-color: var(--primary-color); color: white;">Analyze with Custom Prompt</button>
+        </div>
+        <!-- End Custom Prompt Area -->
+        
         <div id="chat-loader" class="chat-loader">
           <div class="chat-loader-dots">
             <div class="chat-loader-dot"></div>
@@ -565,6 +708,27 @@
     <div class="content">
       <h3>Settings</h3>
       <p>Settings content will be added here.</p>
+    </div>
+  </div>
+  
+  <div id="content-tab-4" class="tab-content">
+    <div class="chat-container">
+      <div id="chat-messages" class="chat-messages">
+        <div class="chat-message assistant">
+          <div class="message-content">
+            Hello! I'm your Vision CMS assistant. How can I help you today?
+          </div>
+        </div>
+      </div>
+      <div class="chat-input-container">
+        <textarea id="chat-input" class="chat-input" placeholder="Type your message here..." rows="2"></textarea>
+        <button id="chat-submit" class="chat-submit-button">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
     </div>
   </div>
 

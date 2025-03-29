@@ -22,6 +22,12 @@ let latestImageUrl: string | null = null;
 let loadedHistory: Capture[] = []; // In-memory store for loaded history
 let currentCaptureForAnalysis: Capture | null = null; // Track capture being analyzed/loaded from history
 
+// DOM Elements
+let chatInput: HTMLTextAreaElement | null = null;
+let chatMessages: HTMLDivElement | null = null;
+let chatSubmitButton: HTMLButtonElement | null = null;
+let isChatLoading = false;
+
 // --- Type Definitions ---
 
 // Represents a single analysis performed on a capture
@@ -125,8 +131,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     const promptSection = document.getElementById(
       "prompt-section"
     ) as HTMLDivElement | null;
+    const customPromptTextarea = document.getElementById(
+      "custom-prompt-textarea"
+    ) as HTMLTextAreaElement | null;
+    const analyzeCustomPromptButton = document.getElementById(
+      "analyze-custom-prompt-button"
+    ) as HTMLButtonElement | null;
 
-    if (!selectionToggle || !imagePreview || !promptSection) {
+    if (
+      !selectionToggle ||
+      !imagePreview ||
+      !promptSection ||
+      !customPromptTextarea ||
+      !analyzeCustomPromptButton
+    ) {
       logError("Required UI elements not found in DOM");
       return; // Stop initialization if essential elements are missing
     }
@@ -164,54 +182,94 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
 
-    // Set up prompt button event listeners
-    const promptButtons = document.querySelectorAll(".prompt-button");
-    promptButtons.forEach((button) => {
-      button.addEventListener("click", async () => {
-        if (!latestImageUrl || analysisInProgress || !currentCaptureForAnalysis) {
-          log("Analysis trigger prevented: Conditions not met.");
-          return;
-        }
-        if (currentCaptureForAnalysis.analysisResults.length > 0) {
-          log(
-            "Analysis trigger prevented: Result already exists for this historical capture."
+    // --- Helper function to trigger analysis ---
+    const triggerAnalysis = async (promptText: string, promptId = "custom") => {
+      if (!latestImageUrl || analysisInProgress || !currentCaptureForAnalysis) {
+        log("Analysis trigger prevented: Conditions not met.", {
+          latestImageUrl: !!latestImageUrl,
+          analysisInProgress,
+          currentCaptureForAnalysis: !!currentCaptureForAnalysis,
+        });
+        return;
+      }
+
+      // Check if we are viewing a historical capture that *already* has a result for this specific prompt
+      const existingResult = currentCaptureForAnalysis.analysisResults.find(
+        (r) => r.promptId === promptId
+      );
+      if (existingResult) {
+        log(
+          `Analysis trigger prevented: Result already exists for prompt ID '${promptId}' on this historical capture.`
+        );
+        // Optionally, re-display the existing result instead of doing nothing
+        displayAnalysisResults(existingResult.resultHtml);
+        return;
+      }
+
+      // --- NEW: Clear custom prompt textarea if using a predefined button ---
+      if (promptId !== "custom" && customPromptTextarea) {
+        customPromptTextarea.value = ""; // Clear custom prompt if using predefined
+      }
+      // --- End NEW ---
+
+      log(`Triggering analysis with prompt ID: ${promptId}`);
+      selectedPromptId = promptId; // Keep track of the type of prompt used
+
+      setAnalysisLoadingState(true);
+      analysisInProgress = true;
+
+      try {
+        const response = await chrome.runtime.sendMessage({
+          action: "analyzeImage",
+          imageUrl: latestImageUrl,
+          customPrompt: promptText, // Use the provided prompt text directly
+        });
+
+        log("Background service worker response for analysis request:", response);
+
+        if (response && response.status === "error") {
+          logError(
+            "Background script reported error initiating analysis:",
+            response.message
           );
-          return; // Don't re-analyze if viewing history with results
-        }
-
-        try {
-          const promptId = (button as HTMLElement).dataset.promptId || "describe";
-          selectedPromptId = promptId;
-          log(`Prompt button clicked: ${promptId}`);
-
-          setAnalysisLoadingState(true);
-          analysisInProgress = true;
-
-          const response = await chrome.runtime.sendMessage({
-            action: "analyzeImage",
-            imageUrl: latestImageUrl,
-            customPrompt: getPromptTextById(promptId),
-          });
-
-          log("Background service worker response for analysis request:", response);
-
-          // Note: Actual result handling happens in the 'analysisComplete' message listener
-          // Error handling *for the request itself* can happen here
-          if (response && response.status === "error") {
-            logError(
-              "Background script reported error initiating analysis:",
-              response.message
-            );
-            setAnalysisLoadingState(false, "Error starting analysis. Try again.");
-            analysisInProgress = false;
-          }
-        } catch (error) {
-          logError("Failed to send analyzeImage message", error);
-          setAnalysisLoadingState(false, "Error occurred sending request.");
+          setAnalysisLoadingState(false, "Error starting analysis. Try again.");
           analysisInProgress = false;
         }
+      } catch (error) {
+        logError("Failed to send analyzeImage message", error);
+        setAnalysisLoadingState(false, "Error occurred sending request.");
+        analysisInProgress = false;
+      }
+    };
+    // --- End helper function ---
+
+    // Set up prompt button event listeners (PREDEFINED prompts)
+    const promptButtons = document.querySelectorAll(
+      ".prompt-button:not(.custom-prompt-button)" // Exclude the custom button
+    );
+    promptButtons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        const promptId = (button as HTMLElement).dataset.promptId || "describe";
+        const promptText = getPromptTextById(promptId); // Get text from predefined list
+        await triggerAnalysis(promptText, promptId); // Use the helper function
       });
     });
+
+    // --- Add listener for the CUSTOM prompt button ---
+    analyzeCustomPromptButton.addEventListener("click", async () => {
+      const customPromptText = customPromptTextarea.value.trim();
+      if (!customPromptText) {
+        logError("Custom prompt button clicked, but textarea is empty.");
+        // Optionally provide feedback: e.g., shake the textarea
+        customPromptTextarea.focus();
+        return;
+      }
+      await triggerAnalysis(customPromptText, "custom"); // Pass custom text and ID 'custom'
+    });
+    // --- End listener for custom prompt button ---
+
+    // Set up chat functionality
+    setupChat();
   } catch (error) {
     logError("Critical error during side panel initialization:", error);
     // Maybe display an error message to the user in the UI here
@@ -248,79 +306,92 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
 
     case "analysisComplete":
       log("Analysis complete message received");
-      analysisInProgress = false; // Reset flag regardless of outcome
-      setAnalysisLoadingState(false); // Stop loader
+      if (message.resultHtml && currentCaptureForAnalysis) {
+        const promptIdToUse = selectedPromptId || "unknown"; // Use the tracked selectedPromptId
+        const promptTextToUse =
+          promptIdToUse === "custom"
+            ? (
+                document.getElementById("custom-prompt-textarea") as HTMLTextAreaElement
+              )?.value?.trim() || "Custom prompt (text unavailable)"
+            : getPromptTextById(promptIdToUse) || "Predefined prompt (text unavailable)";
 
-      if (message.resultHtml) {
-        // Ensure we have context for the capture and the prompt used
-        if (currentCaptureForAnalysis && selectedPromptId) {
-          try {
-            // Create the new analysis result object
-            const newAnalysis: AnalysisResult = {
-              id: Date.now().toString(), // Unique ID for this analysis
-              timestamp: Date.now(),
-              promptId: selectedPromptId,
-              promptText: getPromptTextById(selectedPromptId), // Get full text
-              resultHtml: message.resultHtml,
-            };
+        const newAnalysis: AnalysisResult = {
+          id: `analysis-${Date.now()}`, // Unique ID for this result
+          timestamp: Date.now(),
+          promptId: promptIdToUse,
+          promptText: promptTextToUse, // Store the actual prompt used
+          resultHtml: message.resultHtml,
+        };
 
-            // Update the capture with the new analysis result
-            await updateCaptureResult(currentCaptureForAnalysis.id, newAnalysis);
-            log(`Saved analysis result for capture ${currentCaptureForAnalysis.id}`);
+        // Display and save the new result
+        displayAnalysisResults(newAnalysis.resultHtml);
+        await updateCaptureResult(currentCaptureForAnalysis.id, newAnalysis);
 
-            // Update the object in memory too, if it's the one being viewed
-            // Find the capture in memory and add the new result
-            const captureInMemory = loadedHistory.find(
-              (c) => c.id === currentCaptureForAnalysis!.id
-            );
-            if (captureInMemory) {
-              captureInMemory.analysisResults.push(newAnalysis);
-            } else {
-              // This case should ideally not happen if updateCaptureResult worked correctly
-              // but handles potential inconsistencies between storage and memory updates.
-              logError(
-                "Capture context mismatch after update, reloading history might be needed."
-              );
-            }
-          } catch (error) {
-            logError(
-              `Failed to save analysis result for capture ${currentCaptureForAnalysis.id}:`,
-              error
-            );
-            // Inform user potentially?
-          }
-        } else {
-          logError(
-            "Analysis complete, but missing capture context or prompt ID to save result."
-          );
-        }
-        // Display the results received (might remove this later if results are shown in history)
-        displayAnalysisResults(message.resultHtml);
-        sendResponse({ status: "success" });
-      } else {
-        logError("Analysis complete message missing resultHtml");
-        // Display an error message in the results area
-        displayAnalysisResults(
-          "<p>Error: Analysis completed but no result data received.</p>"
+        // Update the history UI for this capture to reflect the new result
+        const historyItem = document.querySelector(
+          `li[data-capture-id="${currentCaptureForAnalysis.id}"]`
         );
-        sendResponse({ status: "error", message: "Missing resultHtml" });
+        if (historyItem) {
+          // Re-render or update the analysis part of the history item
+          // Find or create the analysis results container within the history item
+          let analysisContainer = historyItem.querySelector<HTMLDivElement>(
+            ".analysis-results-history"
+          );
+          if (!analysisContainer) {
+            analysisContainer = document.createElement("div");
+            analysisContainer.className = "analysis-results-history";
+            // Find a suitable place to append it, e.g., after the image preview
+            const preview = historyItem.querySelector(".history-image-preview");
+            preview?.parentNode?.insertBefore(analysisContainer, preview.nextSibling);
+          }
+          // Add the new result (you might want a more sophisticated rendering)
+          const resultElement = document.createElement("div");
+          resultElement.className = "history-analysis-result";
+          resultElement.innerHTML = `<strong>${newAnalysis.promptId}:</strong> Completed`; // Simple indication
+          analysisContainer.appendChild(resultElement);
+        }
+
+        setAnalysisLoadingState(false);
+        analysisInProgress = false;
+        // Reset selected prompt after completion
+        selectedPromptId = null;
+      } else {
+        logError("Analysis complete message missing data or context", message);
+        setAnalysisLoadingState(false, "Error displaying result.");
+        analysisInProgress = false;
       }
-      // Indicate async response because updateCaptureResult is async
-      return true;
+      sendResponse({ status: "success" });
+      break; // Sync response ok
 
     case "analysisError":
       logError("Analysis error message received:", message.error);
-      analysisInProgress = false; // Reset flag
-      setAnalysisLoadingState(
-        false,
-        `Analysis Error: ${message.error || "Unknown error"}`
+      setAnalysisLoadingState(false, `Analysis failed: ${message.error}`);
+      analysisInProgress = false;
+      selectedPromptId = null; // Reset selected prompt on error
+      sendResponse({ status: "success" });
+      break; // Sync response ok
+
+    case "chatResponse":
+      hideThinkingIndicator();
+      if (message.content) {
+        addMessageToChat("assistant", message.content);
+      } else {
+        addMessageToChat(
+          "assistant",
+          "Sorry, I couldn't generate a response. Please try again."
+        );
+      }
+      sendResponse({ status: "success" });
+      break;
+
+    case "chatError":
+      hideThinkingIndicator();
+      addMessageToChat(
+        "assistant",
+        `Error: ${message.error || "Unknown error occurred"}`
       );
-      // Display the error in the results area
-      displayAnalysisResults(
-        `<p>Error during analysis: ${message.error || "Unknown error"}</p>`
-      );
-      sendResponse({ status: "error acknowledged" });
-      break; // Sync response is fine
+      sendResponse({ status: "success" });
+      break;
 
     default:
       log("Unknown message action received:", message.action);
@@ -331,7 +402,7 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
   // Default return false if no async operation requires keeping the channel open
   // However, the async cases above return true, so this might not be strictly necessary
   // but good practice for clarity if adding more sync cases later.
-  return false;
+  return true; // Keep channel open for potential async operations in handlers
 });
 
 // --- UI Update Functions ---
@@ -834,4 +905,145 @@ function getPromptTextById(promptId: string): string {
       "Based on the content in this image, create a simple JSON structure representing a potential content type definition suitable for a headless CMS. Include relevant fields and estimate their types (e.g., text, image, number).",
   };
   return prompts[promptId] || prompts.describe; // Default to describe if ID is unknown
+}
+
+function setupChat(): void {
+  try {
+    log("Setting up chat functionality");
+
+    // Get DOM elements
+    chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
+    chatMessages = document.getElementById("chat-messages") as HTMLDivElement | null;
+    chatSubmitButton = document.getElementById("chat-submit") as HTMLButtonElement | null;
+
+    if (!chatInput || !chatMessages || !chatSubmitButton) {
+      logError("Chat UI elements not found");
+      return;
+    }
+
+    // Add event listener for the submit button
+    chatSubmitButton.addEventListener("click", submitChatMessage);
+
+    // Add event listener for Enter key (but allow Shift+Enter for new lines)
+    chatInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        submitChatMessage();
+      }
+    });
+
+    log("Chat functionality setup complete");
+  } catch (error) {
+    logError("Error setting up chat functionality:", error);
+  }
+}
+
+function submitChatMessage(): void {
+  if (!chatInput || !chatMessages || !chatSubmitButton || isChatLoading) return;
+
+  const message = chatInput.value.trim();
+  if (!message) return;
+
+  log("Submitting chat message:", message);
+
+  // Add user message to chat
+  addMessageToChat("user", message);
+
+  // Clear input
+  chatInput.value = "";
+
+  // Show thinking indicator
+  showThinkingIndicator();
+
+  // Send message to server
+  sendChatMessage(message);
+}
+
+function addMessageToChat(role: "user" | "assistant", content: string): void {
+  if (!chatMessages) return;
+
+  const messageElement = document.createElement("div");
+  messageElement.className = `chat-message ${role}`;
+
+  const contentElement = document.createElement("div");
+  contentElement.className = "message-content";
+
+  // If we have markdown support and this is an assistant message, render as markdown
+  if (markedModule && role === "assistant") {
+    contentElement.innerHTML = markedModule.marked(content);
+  } else {
+    // Otherwise just set text content with line breaks preserved
+    contentElement.textContent = content;
+  }
+
+  messageElement.appendChild(contentElement);
+  chatMessages.appendChild(messageElement);
+
+  // Scroll to bottom
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+function showThinkingIndicator(): void {
+  if (!chatMessages) return;
+
+  isChatLoading = true;
+
+  const thinkingElement = document.createElement("div");
+  thinkingElement.className = "chat-thinking";
+  thinkingElement.id = "chat-thinking";
+
+  for (let i = 0; i < 3; i++) {
+    const dot = document.createElement("div");
+    dot.className = "chat-thinking-dot";
+    thinkingElement.appendChild(dot);
+  }
+
+  chatMessages.appendChild(thinkingElement);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  if (chatSubmitButton) {
+    chatSubmitButton.disabled = true;
+  }
+}
+
+function hideThinkingIndicator(): void {
+  const thinkingElement = document.getElementById("chat-thinking");
+  if (thinkingElement) {
+    thinkingElement.remove();
+  }
+
+  isChatLoading = false;
+
+  if (chatSubmitButton) {
+    chatSubmitButton.disabled = false;
+  }
+}
+
+async function sendChatMessage(message: string): Promise<void> {
+  try {
+    log("Sending chat message to background script");
+
+    const response = await chrome.runtime.sendMessage({
+      action: "sendChatMessage",
+      message,
+      source: "sidePanel",
+    });
+
+    log("Received response from background script:", response);
+
+    if (response.status === "error") {
+      hideThinkingIndicator();
+      addMessageToChat("assistant", `Error: ${response.message}`);
+      return;
+    }
+
+    // Response is handled by the message listener
+  } catch (error) {
+    logError("Error sending chat message:", error);
+    hideThinkingIndicator();
+    addMessageToChat(
+      "assistant",
+      "Sorry, there was an error sending your message. Please try again."
+    );
+  }
 }
