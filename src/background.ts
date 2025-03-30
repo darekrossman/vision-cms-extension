@@ -4,6 +4,7 @@ import { createBackgroundLogger, generateFilename } from "./utils";
 const API_ENDPOINT = "http://localhost:3000/process-image";
 const ANALYSIS_ENDPOINT = "http://localhost:3000/analyze-image";
 const CHAT_ENDPOINT = "http://localhost:3000/chat";
+const FIRECRAWL_ENDPOINT = "http://localhost:3000/firecrawl-scrape";
 
 // Default prompt for image analysis
 const DEFAULT_PROMPT = "Describe what's in this image and extract any text content.";
@@ -568,7 +569,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "sendChatMessage":
-      handleChatMessage(message.message, sendResponse, message.imageUrl, message.model);
+      handleChatMessage(
+        message.message,
+        sendResponse,
+        message.imageUrl,
+        message.model,
+        message.conversationHistory,
+        message.currentTabUrl
+      );
       return true;
 
     case "clearHistory":
@@ -587,6 +595,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       });
       return true; // Keep the message channel open for the async response
+
+    case "captureFirecrawlFullPage":
+      if (message.url) {
+        handleFirecrawlScreenshot(message.url, sendResponse);
+      } else {
+        sendResponse({
+          status: "error",
+          message: "No URL provided for Firecrawl screenshot",
+        });
+      }
+      break;
 
     default:
       // Enhanced logging for unknown actions
@@ -866,7 +885,13 @@ async function handleChatMessage(
   message: string,
   sendResponse: Function,
   imageUrl: string | null = null,
-  model: string | null = null
+  model: string | null = null,
+  conversationHistory: Array<{
+    role: string;
+    content: string;
+    imageUrl?: string | null;
+  }> = [],
+  currentTabUrl: string | null = null
 ): Promise<void> {
   log(
     "Handling chat message:",
@@ -874,7 +899,12 @@ async function handleChatMessage(
     "with image:",
     !!imageUrl,
     "using model:",
-    model
+    model,
+    "with conversation history:",
+    conversationHistory.length,
+    "messages",
+    "tab URL:",
+    currentTabUrl
   );
 
   if (!message && !imageUrl) {
@@ -906,12 +936,26 @@ async function handleChatMessage(
       log("Using model:", model);
     }
 
+    // Add conversation history if provided
+    if (conversationHistory && conversationHistory.length > 0) {
+      formData.append("conversationHistory", JSON.stringify(conversationHistory));
+      log("Added conversation history with", conversationHistory.length, "messages");
+    }
+
+    // Add current tab URL if provided
+    if (currentTabUrl) {
+      formData.append("currentTabUrl", currentTabUrl);
+      log("Added current tab URL:", currentTabUrl);
+    }
+
     // Log form data entries for debugging
     try {
       log("Form data entries:");
       for (const pair of (formData as any).entries()) {
         if (pair[0] === "imageUrl" || pair[0] === "imageData") {
           log(`- ${pair[0]}: (image data)`);
+        } else if (pair[0] === "conversationHistory") {
+          log(`- ${pair[0]}: (${JSON.parse(pair[1]).length} messages)`);
         } else {
           log(`- ${pair[0]}: ${pair[1]}`);
         }
@@ -1042,4 +1086,51 @@ function parseSSEEvents(buffer: string): {
   }
 
   return { parsed: events, remainder };
+}
+
+// Handle Firecrawl screenshot request
+async function handleFirecrawlScreenshot(
+  url: string,
+  sendResponse: Function
+): Promise<void> {
+  log("Handling Firecrawl full page screenshot for URL", url);
+
+  try {
+    // Create the request to the server endpoint
+    const response = await fetch(FIRECRAWL_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url: url,
+        formats: ["screenshot@fullPage"],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.success || !data.data || !data.data.screenshot) {
+      throw new Error("Failed to get screenshot from Firecrawl");
+    }
+
+    log("Firecrawl captured full page screenshot successfully");
+
+    // Return the screenshot data
+    sendResponse({
+      status: "ok",
+      dataUrl: `data:image/png;base64,${data.data.screenshot}`,
+      message: "Full page screenshot captured successfully via Firecrawl",
+    });
+  } catch (err) {
+    logError("Error capturing Firecrawl screenshot:", err);
+    sendResponse({
+      status: "error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

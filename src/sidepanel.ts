@@ -83,6 +83,18 @@ let availableModels: {
   supportsVision: boolean;
 }[] = [];
 let selectedModel = ""; // Changed from string | null to string only
+// Add a variable to store chat conversation history
+const chatHistory: {
+  role: "user" | "assistant";
+  content: string;
+  imageUrl?: string | null;
+}[] = [];
+
+// Track the current chat conversation
+let currentChatId: string | null = null;
+// Store all chat conversations
+let chatConversations: ChatConversation[] = [];
+const MAX_CHAT_HISTORY_ITEMS = 20;
 
 // --- Type Definitions ---
 
@@ -93,6 +105,18 @@ interface AnalysisResult {
   promptId: string; // e.g., 'describe', 'analyze-ui'
   promptText: string; // The actual prompt text used
   resultHtml: string; // The resulting HTML content from analysis
+}
+
+// Represents a single chat conversation
+interface ChatConversation {
+  id: string;
+  timestamp: number;
+  title: string;
+  messages: {
+    role: "user" | "assistant";
+    content: string;
+    imageUrl?: string | null;
+  }[];
 }
 
 // Represents a single captured image and its associated analyses
@@ -1174,16 +1198,63 @@ function setupChat(): void {
   ) as HTMLDivElement | null;
   const chatActionButtons = document.querySelectorAll(".chat-action-button");
 
+  // Chat history elements
+  const newChatButton = document.getElementById(
+    "new-chat-button"
+  ) as HTMLButtonElement | null;
+  const chatHistoryToggle = document.getElementById(
+    "chat-history-toggle"
+  ) as HTMLButtonElement | null;
+  const chatHistoryPanel = document.getElementById(
+    "chat-history-panel"
+  ) as HTMLDivElement | null;
+  const closeChatHistoryButton = document.getElementById(
+    "close-chat-history"
+  ) as HTMLButtonElement | null;
+
   if (
     !chatMessages ||
     !chatInput ||
     !chatSubmit ||
     !chatActionsToggle ||
-    !chatActionsMenu
+    !chatActionsMenu ||
+    !newChatButton ||
+    !chatHistoryToggle ||
+    !chatHistoryPanel ||
+    !closeChatHistoryButton
   ) {
     logError("Required chat UI elements not found");
     return;
   }
+
+  // Load chat history
+  loadChatConversations().then((conversations) => {
+    chatConversations = conversations;
+    displayChatHistory(chatConversations);
+
+    // Create a new chat if there's no current chat
+    if (!currentChatId) {
+      createNewChat();
+    }
+  });
+
+  // Setup New Chat button
+  newChatButton.addEventListener("click", () => {
+    log("New chat button clicked");
+    createNewChat();
+  });
+
+  // Setup Chat History toggle
+  chatHistoryToggle.addEventListener("click", () => {
+    log("Chat history toggle clicked");
+    chatHistoryPanel.classList.toggle("visible");
+  });
+
+  // Setup Close Chat History button
+  closeChatHistoryButton.addEventListener("click", () => {
+    log("Close chat history button clicked");
+    chatHistoryPanel.classList.remove("visible");
+  });
 
   // Setup chat actions toggle functionality
   chatActionsToggle.addEventListener("click", (e) => {
@@ -1235,174 +1306,291 @@ function setupChat(): void {
   log("Chat setup completed");
 }
 
-// Function to handle chat action button clicks
-function handleChatAction(action: string | null): void {
-  if (!action) return;
+/**
+ * Creates a new chat conversation and resets the UI
+ */
+function createNewChat(): void {
+  log("Creating new chat");
 
-  log(`Chat action triggered: ${action}`);
+  // Save current chat if it has messages
+  if (currentChatId && chatHistory.length > 0) {
+    saveChatConversation();
+  }
 
-  switch (action) {
-    case "site-analysis":
-      // Site analysis functionality
-      log("Site Analysis action triggered");
-      const siteAnalysisMessage = "Run site analysis on this page";
+  // Generate new chat ID
+  currentChatId = Date.now().toString();
 
-      // Add the message to chat UI
-      addMessageToChat("user", siteAnalysisMessage);
+  // Clear current chat history
+  chatHistory.length = 0;
 
-      // Send the message to the assistant
-      sendChatMessage(siteAnalysisMessage);
-      break;
+  // Clear chat UI
+  if (chatMessages) {
+    chatMessages.innerHTML = "";
 
-    case "visual-analysis":
-    case "capture-snippet":
-      // Visual Analysis (Capture Page) and Capture Snippet functionality
-      const actionName =
-        action === "visual-analysis" ? "Capture Page" : "Capture Snippet";
-      log(`${actionName} action triggered`);
+    // Add initial greeting
+    const welcomeMessage = document.createElement("div");
+    welcomeMessage.className = "chat-message assistant";
+    const welcomeContent = document.createElement("div");
+    welcomeContent.className = "message-content";
+    welcomeContent.textContent =
+      "Hello! I'm your Vision CMS assistant. How can I help you today?";
+    welcomeMessage.appendChild(welcomeContent);
+    chatMessages.appendChild(welcomeMessage);
 
-      // If it's a capture snippet, use the selection mode
-      if (action === "capture-snippet") {
-        // Use the existing selection mode toggle logic for "Capture Snippet"
-        const wasActive = isSelectionModeActive;
-        isSelectionModeActive = true; // Always activate (not toggle) when clicked
+    // Add initial message to history
+    chatHistory.push({
+      role: "assistant",
+      content: "Hello! I'm your Vision CMS assistant. How can I help you today?",
+    });
+  }
 
-        // Update UI state
-        const selectionToggle = document.getElementById(
-          "selection-toggle"
-        ) as HTMLButtonElement | null;
+  // Clear any input and attachments
+  if (chatInput) {
+    chatInput.value = "";
+  }
+  clearAllAttachments();
+}
 
-        if (selectionToggle) {
-          updateSelectionToggleState(isSelectionModeActive, selectionToggle);
-        }
+/**
+ * Saves the current chat conversation to storage
+ */
+async function saveChatConversation(): Promise<void> {
+  if (!currentChatId || chatHistory.length <= 1) {
+    // Don't save if there's no chat ID or only the welcome message
+    return;
+  }
 
-        // Send message to background script to enter selection mode
-        chrome.runtime
-          .sendMessage({
-            action: "toggleSelectionMode",
-            active: true, // Always true when initiating from action buttons
-            source: "sidePanel",
-          })
-          .then((response) => {
-            log(`Background response for toggleSelectionMode:`, response);
-            if (response && response.status === "error") {
-              logError(`Error toggling selection mode:`, response.message);
-              // Revert state on error
-              isSelectionModeActive = wasActive;
-              if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
-            }
-          })
-          .catch((error) => {
-            logError(`Failed to send toggleSelectionMode message:`, error);
-            // Revert state on error
-            isSelectionModeActive = wasActive;
-            if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
-          });
-      } else {
-        // For "Capture Page", directly take a full page screenshot
-        log("Capturing full page screenshot");
-        showChatLoader(); // Show loading indicator
+  log("Saving chat conversation:", currentChatId);
 
-        // Send message to background script to capture full page
-        chrome.runtime
-          .sendMessage({
-            action: "captureFullPage",
-            source: "sidePanel",
-          })
-          .then(async (response) => {
-            log(`Background response for captureFullPage:`, response);
+  // Find a title from the first user message
+  const firstUserMessage = chatHistory.find((msg) => msg.role === "user");
+  const title = firstUserMessage
+    ? firstUserMessage.content.substring(0, 50) +
+      (firstUserMessage.content.length > 50 ? "..." : "")
+    : "New conversation";
 
-            if (response && response.status === "ok" && response.dataUrl) {
-              // Successfully captured screenshot
-              hideChatLoader();
+  const conversation: ChatConversation = {
+    id: currentChatId,
+    timestamp: Date.now(),
+    title,
+    messages: [...chatHistory], // Create a copy of the messages
+  };
 
-              // Attach the screenshot to the chat
-              attachImageToChat(response.dataUrl);
+  // Add to in-memory storage
+  const existingIndex = chatConversations.findIndex((chat) => chat.id === currentChatId);
+  if (existingIndex !== -1) {
+    // Update existing conversation
+    chatConversations[existingIndex] = conversation;
+  } else {
+    // Add new conversation at the beginning
+    chatConversations.unshift(conversation);
 
-              log("Full page screenshot captured and attached to chat");
-            } else if (response && response.status === "error") {
-              hideChatLoader();
-              logError(`Error capturing full page:`, response.message);
-              // Show error notification to user
-              const errorMsg = response.message || "Failed to capture screenshot";
-              alert(`Error: ${errorMsg}`);
-            }
-          })
-          .catch((error) => {
-            hideChatLoader();
-            logError(`Failed to send captureFullPage message:`, error);
-            alert("Error: Failed to capture screenshot");
-          });
-      }
+    // Limit number of conversations
+    if (chatConversations.length > MAX_CHAT_HISTORY_ITEMS) {
+      chatConversations = chatConversations.slice(0, MAX_CHAT_HISTORY_ITEMS);
+    }
+  }
 
-      // Close the actions menu
-      const chatActionsMenu = document.getElementById("chat-actions-menu");
-      if (chatActionsMenu) {
-        chatActionsMenu.classList.remove("visible");
-      }
-      break;
+  // Save to chrome storage
+  try {
+    await chrome.storage.local.set({ chatConversations });
+    log("Chat conversations saved to storage");
 
-    case "add-media":
-      // Add media functionality
-      log("Add Media action triggered");
-
-      // Create a hidden file input element
-      const fileInput = document.createElement("input");
-      fileInput.type = "file";
-      fileInput.accept = "image/*";
-      fileInput.style.display = "none";
-      document.body.appendChild(fileInput);
-
-      // Trigger a click on the file input
-      fileInput.click();
-
-      // Handle file selection
-      fileInput.addEventListener("change", (event) => {
-        const files = fileInput.files;
-        if (files && files.length > 0) {
-          const file = files[0];
-
-          // Check if it's an image
-          if (file.type.startsWith("image/")) {
-            log("Converting file to data URL");
-
-            // Create a FileReader to convert to data URL instead of blob URL
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              if (e.target && typeof e.target.result === "string") {
-                const dataUrl = e.target.result;
-
-                // Attach the image data URL to chat
-                attachImageToChat(dataUrl);
-
-                log("Image converted to data URL and attached to chat");
-              } else {
-                logError("Failed to read file as data URL");
-              }
-            };
-
-            reader.onerror = () => {
-              logError("Error reading file:", reader.error);
-            };
-
-            // Read the file as a data URL (base64)
-            reader.readAsDataURL(file);
-          } else {
-            logError("Selected file is not an image");
-          }
-        }
-
-        // Remove the file input from the DOM
-        document.body.removeChild(fileInput);
-      });
-      break;
-
-    default:
-      logError(`Unknown chat action: ${action}`);
+    // Update the chat history UI
+    displayChatHistory(chatConversations);
+  } catch (error) {
+    logError("Error saving chat conversations to storage:", error);
   }
 }
 
-function submitChatMessage(): void {
+/**
+ * Loads chat conversations from storage
+ */
+async function loadChatConversations(): Promise<ChatConversation[]> {
+  log("Loading chat conversations from storage");
+  try {
+    const result = await chrome.storage.local.get("chatConversations");
+    if (result.chatConversations) {
+      log(`Loaded ${result.chatConversations.length} chat conversations`);
+      return result.chatConversations;
+    }
+  } catch (error) {
+    logError("Error loading chat conversations from storage:", error);
+  }
+  return [];
+}
+
+/**
+ * Displays the chat history in the UI
+ */
+function displayChatHistory(conversations: ChatConversation[]): void {
+  const chatHistoryList = document.getElementById("chat-history-list");
+  if (!chatHistoryList) return;
+
+  // Clear existing items
+  chatHistoryList.innerHTML = "";
+
+  if (conversations.length === 0) {
+    // Show empty state
+    const emptyState = document.createElement("li");
+    emptyState.className = "chat-history-item empty-state";
+    emptyState.textContent = "No chat history yet";
+    chatHistoryList.appendChild(emptyState);
+    return;
+  }
+
+  // Add each conversation to the list
+  conversations.forEach((conversation) => {
+    const listItem = document.createElement("li");
+    listItem.className = "chat-history-item";
+    listItem.dataset.chatId = conversation.id;
+
+    const title = document.createElement("div");
+    title.className = "chat-history-item-title";
+    title.textContent = conversation.title;
+
+    const time = document.createElement("div");
+    time.className = "chat-history-item-time";
+    time.textContent = formatChatTime(conversation.timestamp);
+
+    listItem.appendChild(title);
+    listItem.appendChild(time);
+
+    // Add click event to load this conversation
+    listItem.addEventListener("click", () => {
+      log("Loading chat conversation:", conversation.id);
+      loadChatConversation(conversation);
+    });
+
+    chatHistoryList.appendChild(listItem);
+  });
+}
+
+/**
+ * Loads a chat conversation from history
+ */
+function loadChatConversation(conversation: ChatConversation): void {
+  // Save current chat first if needed
+  if (currentChatId && chatHistory.length > 0) {
+    saveChatConversation();
+  }
+
+  // Set current chat ID
+  currentChatId = conversation.id;
+
+  // Update chat history array
+  chatHistory.length = 0;
+  chatHistory.push(...conversation.messages);
+
+  // Update UI
+  if (chatMessages) {
+    chatMessages.innerHTML = "";
+
+    // Add all messages
+    conversation.messages.forEach((message) => {
+      addMessageToChat(message.role, message.content, message.imageUrl || null);
+    });
+  }
+
+  // Close the history panel
+  const chatHistoryPanel = document.getElementById("chat-history-panel");
+  if (chatHistoryPanel) {
+    chatHistoryPanel.classList.remove("visible");
+  }
+
+  // Clear any current attachments
+  clearAllAttachments();
+}
+
+/**
+ * Format a timestamp for display in chat history
+ */
+function formatChatTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) {
+    return `Today, ${date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  } else if (date.toDateString() === yesterday.toDateString()) {
+    return `Yesterday, ${date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}`;
+  } else {
+    return (
+      date.toLocaleDateString([], { month: "short", day: "numeric" }) +
+      `, ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    );
+  }
+}
+
+/**
+ * Adds a message to the chat display
+ */
+function addMessageToChat(
+  role: "user" | "assistant",
+  content: string,
+  imageUrl: string | null = null
+): void {
+  if (!chatMessages) return;
+
+  const messageElement = document.createElement("div");
+  messageElement.className = `chat-message ${role}`;
+
+  const contentElement = document.createElement("div");
+  contentElement.className = "message-content";
+
+  // If there's an image and this is a user message, add it before the text
+  if (imageUrl && role === "user") {
+    const imgElement = document.createElement("img");
+    imgElement.src = imageUrl;
+    imgElement.className = "chat-message-image";
+    imgElement.alt = "Attached image";
+    contentElement.appendChild(imgElement);
+
+    // Add a line break if there's also text content
+    if (content) {
+      const breakElement = document.createElement("br");
+      contentElement.appendChild(breakElement);
+    }
+  }
+
+  // Add the text content
+  if (content) {
+    // If we have markdown support and this is an assistant message, render as markdown
+    if (markedModule && role === "assistant") {
+      contentElement.innerHTML += markedModule.marked(content);
+    } else {
+      // Otherwise just set text content with line breaks preserved
+      const textNode = document.createTextNode(content);
+      contentElement.appendChild(textNode);
+    }
+  }
+
+  messageElement.appendChild(contentElement);
+  chatMessages.appendChild(messageElement);
+
+  // Scroll to bottom
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+
+  // Add message to history
+  chatHistory.push({ role, content, imageUrl });
+
+  // Save chat after a new message is added
+  if (currentChatId) {
+    saveChatConversation();
+  }
+}
+
+/**
+ * Submit a chat message to the assistant
+ */
+async function submitChatMessage(): Promise<void> {
   if (!chatInput || !chatMessages || !chatSubmit || isChatLoading) return;
 
   const message = chatInput.value.trim();
@@ -1463,53 +1651,11 @@ function submitChatMessage(): void {
 
   // Clear all attachments
   clearAllAttachments();
-}
 
-function addMessageToChat(
-  role: "user" | "assistant",
-  content: string,
-  imageUrl: string | null = null
-): void {
-  if (!chatMessages) return;
-
-  const messageElement = document.createElement("div");
-  messageElement.className = `chat-message ${role}`;
-
-  const contentElement = document.createElement("div");
-  contentElement.className = "message-content";
-
-  // If there's an image and this is a user message, add it before the text
-  if (imageUrl && role === "user") {
-    const imgElement = document.createElement("img");
-    imgElement.src = imageUrl;
-    imgElement.className = "chat-message-image";
-    imgElement.alt = "Attached image";
-    contentElement.appendChild(imgElement);
-
-    // Add a line break if there's also text content
-    if (content) {
-      const breakElement = document.createElement("br");
-      contentElement.appendChild(breakElement);
-    }
+  // Create a new chat if one doesn't exist
+  if (!currentChatId) {
+    currentChatId = Date.now().toString();
   }
-
-  // Add the text content
-  if (content) {
-    // If we have markdown support and this is an assistant message, render as markdown
-    if (markedModule && role === "assistant") {
-      contentElement.innerHTML += markedModule.marked(content);
-    } else {
-      // Otherwise just set text content with line breaks preserved
-      const textNode = document.createTextNode(content);
-      contentElement.appendChild(textNode);
-    }
-  }
-
-  messageElement.appendChild(contentElement);
-  chatMessages.appendChild(messageElement);
-
-  // Scroll to bottom
-  chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
 function showThinkingIndicator(): void {
@@ -1631,11 +1777,17 @@ async function sendChatMessage(
         (selectedModel ? ` using model: ${selectedModel}` : "")
     );
 
+    // Get active tab URL
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const currentTabUrl = tabs.length > 0 ? tabs[0].url : null;
+
     // Create the message object based on available parameters
     const messagePayload: any = {
       action: "sendChatMessage",
       message,
       source: "sidePanel",
+      conversationHistory: chatHistory,
+      currentTabUrl,
     };
 
     // Only add imageUrl if it's not null
@@ -1959,7 +2111,11 @@ async function fetchAvailableModels(): Promise<void> {
     // Convert models object to array with ID included
     const modelsArray = Object.entries(responseData.models).map(([id, modelData]) => ({
       id,
-      ...(modelData as { name: string; provider: string; supportsVision: boolean }),
+      ...(modelData as {
+        name: string;
+        provider: string;
+        supportsVision: boolean;
+      }),
     }));
 
     availableModels = modelsArray;
@@ -2255,5 +2411,172 @@ function populateModelSelector(models: any[]): void {
       log("Selected model changed to:", selectedModel);
     });
     chatModelSelector.hasEventListener = true;
+  }
+}
+
+// Function to handle chat action button clicks
+function handleChatAction(action: string | null): void {
+  if (!action) return;
+
+  log(`Chat action triggered: ${action}`);
+
+  switch (action) {
+    case "site-analysis":
+      // Site analysis functionality
+      log("Site Analysis action triggered");
+      const siteAnalysisMessage = "Run site analysis on this page";
+
+      // Add the message to chat UI
+      addMessageToChat("user", siteAnalysisMessage);
+
+      // Send the message to the assistant
+      sendChatMessage(siteAnalysisMessage);
+      break;
+
+    case "visual-analysis":
+    case "capture-snippet":
+      // Visual Analysis (Capture Page) and Capture Snippet functionality
+      const actionName =
+        action === "visual-analysis" ? "Capture Page" : "Capture Snippet";
+      log(`${actionName} action triggered`);
+
+      // If it's a capture snippet, use the selection mode
+      if (action === "capture-snippet") {
+        // Use the existing selection mode toggle logic for "Capture Snippet"
+        const wasActive = isSelectionModeActive;
+        isSelectionModeActive = true; // Always activate (not toggle) when clicked
+
+        // Update UI state
+        const selectionToggle = document.getElementById(
+          "selection-toggle"
+        ) as HTMLButtonElement | null;
+
+        if (selectionToggle) {
+          updateSelectionToggleState(isSelectionModeActive, selectionToggle);
+        }
+
+        // Send message to background script to enter selection mode
+        chrome.runtime
+          .sendMessage({
+            action: "toggleSelectionMode",
+            active: true, // Always true when initiating from action buttons
+            source: "sidePanel",
+          })
+          .then((response) => {
+            log(`Background response for toggleSelectionMode:`, response);
+            if (response && response.status === "error") {
+              logError(`Error toggling selection mode:`, response.message);
+              // Revert state on error
+              isSelectionModeActive = wasActive;
+              if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
+            }
+          })
+          .catch((error) => {
+            logError(`Failed to send toggleSelectionMode message:`, error);
+            // Revert state on error
+            isSelectionModeActive = wasActive;
+            if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
+          });
+      } else {
+        // For "Capture Page", directly take a full page screenshot
+        log("Capturing full page screenshot");
+        showChatLoader(); // Show loading indicator
+
+        // Send message to background script to capture full page
+        chrome.runtime
+          .sendMessage({
+            action: "captureFullPage",
+            source: "sidePanel",
+          })
+          .then(async (response) => {
+            log(`Background response for captureFullPage:`, response);
+
+            if (response && response.status === "ok" && response.dataUrl) {
+              // Successfully captured screenshot
+              hideChatLoader();
+
+              // Attach the screenshot to the chat
+              attachImageToChat(response.dataUrl);
+
+              log("Full page screenshot captured and attached to chat");
+            } else if (response && response.status === "error") {
+              hideChatLoader();
+              logError(`Error capturing full page:`, response.message);
+              // Show error notification to user
+              const errorMsg = response.message || "Failed to capture screenshot";
+              alert(`Error: ${errorMsg}`);
+            }
+          })
+          .catch((error) => {
+            hideChatLoader();
+            logError(`Failed to send captureFullPage message:`, error);
+            alert("Error: Failed to capture screenshot");
+          });
+      }
+
+      // Close the actions menu
+      const chatActionsMenu = document.getElementById("chat-actions-menu");
+      if (chatActionsMenu) {
+        chatActionsMenu.classList.remove("visible");
+      }
+      break;
+
+    case "add-media":
+      // Add media functionality
+      log("Add Media action triggered");
+
+      // Create a hidden file input element
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/*";
+      fileInput.style.display = "none";
+      document.body.appendChild(fileInput);
+
+      // Trigger a click on the file input
+      fileInput.click();
+
+      // Handle file selection
+      fileInput.addEventListener("change", (event) => {
+        const files = fileInput.files;
+        if (files && files.length > 0) {
+          const file = files[0];
+
+          // Check if it's an image
+          if (file.type.startsWith("image/")) {
+            log("Converting file to data URL");
+
+            // Create a FileReader to convert to data URL instead of blob URL
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              if (e.target && typeof e.target.result === "string") {
+                const dataUrl = e.target.result;
+
+                // Attach the image data URL to chat
+                attachImageToChat(dataUrl);
+
+                log("Image converted to data URL and attached to chat");
+              } else {
+                logError("Failed to read file as data URL");
+              }
+            };
+
+            reader.onerror = () => {
+              logError("Error reading file:", reader.error);
+            };
+
+            // Read the file as a data URL (base64)
+            reader.readAsDataURL(file);
+          } else {
+            logError("Selected file is not an image");
+          }
+        }
+
+        // Remove the file input from the DOM
+        document.body.removeChild(fileInput);
+      });
+      break;
+
+    default:
+      logError(`Unknown chat action: ${action}`);
   }
 }

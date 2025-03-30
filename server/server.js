@@ -10,7 +10,8 @@ const path = require("node:path");
 const { v4: uuidv4 } = require("uuid");
 const Anthropic = require("@anthropic-ai/sdk");
 const OpenAI = require("openai");
-const contentstack = require("@contentstack/management"); // Import Contentstack SDK
+const contentstack = require("@contentstack/management");
+// We'll load Firecrawl dynamically since it's an ESM module
 
 // Define available models by provider
 const ANTHROPIC_MODELS = {
@@ -19,30 +20,24 @@ const ANTHROPIC_MODELS = {
 		provider: "anthropic",
 		supportsVision: true,
 		maxTokens: 4096,
-	},
-	"claude-3-opus-20240229": {
-		name: "Claude 3 Opus",
-		provider: "anthropic",
-		supportsVision: true,
-		maxTokens: 4096,
-	},
-	"claude-3-sonnet-20240229": {
-		name: "Claude 3 Sonnet",
-		provider: "anthropic",
-		supportsVision: true,
-		maxTokens: 4096,
-	},
-	"claude-3-haiku-20240307": {
-		name: "Claude 3 Haiku",
-		provider: "anthropic",
-		supportsVision: true, 
-		maxTokens: 4096,
-	},
+	}
 };
 
 const OPENAI_MODELS = {
 	"gpt-4o": {
 		name: "GPT-4o",
+		provider: "openai",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"o1": {
+		name: "o1",
+		provider: "openai",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"gpt-4o-mini": {
+		name: "GPT-4o Mini",
 		provider: "openai",
 		supportsVision: true,
 		maxTokens: 4096,
@@ -71,6 +66,7 @@ const PORT = process.env.PORT || 3000;
 // --- Environment Variable Checks ---
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const FIRECRAWL_API_KEY = process.env.FIRECRAWL_API_KEY; // Add Firecrawl key check
 const CONTENTSTACK_API_KEY = process.env.CONTENTSTACK_API_KEY; // Stack API Key
 const CONTENTSTACK_MANAGEMENT_TOKEN = process.env.CONTENTSTACK_MANAGEMENT_TOKEN; // Stack Management Token
 const CONTENTSTACK_HOST =
@@ -78,11 +74,21 @@ const CONTENTSTACK_HOST =
 const CONTENTSTACK_REGION = process.env.CONTENTSTACK_REGION; // Optional: e.g., 'us-east-1', 'eu-central-1'
 
 if (!ANTHROPIC_API_KEY) {
-	console.error("Warning: Missing ANTHROPIC_API_KEY environment variable - Anthropic models will not be available");
+	console.error(
+		"Warning: Missing ANTHROPIC_API_KEY environment variable - Anthropic models will not be available",
+	);
 }
 
 if (!OPENAI_API_KEY) {
-	console.error("Warning: Missing OPENAI_API_KEY environment variable - OpenAI models will not be available");
+	console.error(
+		"Warning: Missing OPENAI_API_KEY environment variable - OpenAI models will not be available",
+	);
+}
+
+if (!FIRECRAWL_API_KEY) {
+	console.warn(
+		"Warning: Missing FIRECRAWL_API_KEY environment variable - Firecrawl tools will not be available",
+	);
 }
 
 if (!ANTHROPIC_API_KEY && !OPENAI_API_KEY) {
@@ -116,6 +122,8 @@ if (OPENAI_API_KEY) {
 	console.log("OpenAI client initialized successfully");
 }
 
+// Initialize Firecrawl client later with dynamic import
+
 // --- Initialize Contentstack Client ---
 const csClient = contentstack.client({
 	host: CONTENTSTACK_HOST,
@@ -135,6 +143,60 @@ console.log(
 	}`,
 );
 
+// We'll use this variable to store our Firecrawl client
+let firecrawlClient = null;
+
+// This function will dynamically initialize the Firecrawl client if the API key is available
+async function initializeFirecrawl() {
+	if (!FIRECRAWL_API_KEY) {
+		console.log("Firecrawl client not initialized (no API key).");
+		return null;
+	}
+
+	try {
+		// Dynamically import the ES Module
+		const FirecrawlModule = await import("@mendable/firecrawl-js");
+		const FirecrawlApp = FirecrawlModule.default;
+
+		// Initialize client
+		const client = new FirecrawlApp({ apiKey: FIRECRAWL_API_KEY });
+		console.log("Firecrawl client initialized successfully");
+		return client;
+	} catch (error) {
+		console.error("Failed to initialize Firecrawl client:", error);
+		return null;
+	}
+}
+
+// Main async function to initialize everything and start the server
+async function main() {
+	// Initialize Firecrawl if API key is available
+	firecrawlClient = await initializeFirecrawl();
+
+	// Start the server only after initialization is complete
+	app.listen(PORT, () => {
+		console.log(`Server is running on http://localhost:${PORT}`);
+		console.log(`Images will be available at http://localhost:${PORT}/images/`);
+
+		// Log available models
+		const anthropicModelsAvailable = ANTHROPIC_API_KEY
+			? Object.keys(ANTHROPIC_MODELS).length
+			: 0;
+		const openaiModelsAvailable = OPENAI_API_KEY
+			? Object.keys(OPENAI_MODELS).length
+			: 0;
+		console.log(
+			`Available models: ${anthropicModelsAvailable} Anthropic models, ${openaiModelsAvailable} OpenAI models`,
+		);
+
+		if (firecrawlClient) {
+			console.log("Firecrawl tools are available");
+		} else {
+			console.log("Firecrawl tools are NOT available");
+		}
+	});
+}
+
 // --- Anthropic API with retry logic ---
 /**
  * Calls Anthropic API with retry logic and exponential backoff
@@ -144,31 +206,47 @@ console.log(
  * @param {Number} initialDelay - Initial delay in ms (default: 1000)
  * @returns {Promise<Object>} - The API response
  */
-async function callAnthropicWithRetry(params, sendEvent = null, maxRetries = 3, initialDelay = 1000) {
+async function callAnthropicWithRetry(
+	params,
+	sendEvent = null,
+	maxRetries = 3,
+	initialDelay = 1000,
+) {
 	if (!anthropicClient) {
-		throw new Error("Anthropic client not initialized. Please check your API key.");
+		throw new Error(
+			"Anthropic client not initialized. Please check your API key.",
+		);
 	}
-	
+
 	let lastError;
 	let retryCount = 0;
-	
+
 	while (retryCount <= maxRetries) {
 		try {
-			console.log(`Calling Anthropic API (attempt ${retryCount + 1}/${maxRetries + 1})...`);
+			console.log(
+				`Calling Anthropic API (attempt ${retryCount + 1}/${
+					maxRetries + 1
+				})...`,
+			);
 			return await anthropicClient.messages.create(params);
 		} catch (error) {
 			lastError = error;
-			
+
 			// If this was our last retry, throw the error
 			if (retryCount >= maxRetries) {
 				console.error(`Failed after ${maxRetries + 1} attempts:`, error);
 				throw error;
 			}
-			
+
 			// Calculate delay with exponential backoff: delay = initialDelay * 2^retryCount
 			const delay = initialDelay * Math.pow(2, retryCount);
-			console.warn(`Anthropic API call failed (attempt ${retryCount + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`, error);
-			
+			console.warn(
+				`Anthropic API call failed (attempt ${retryCount + 1}/${
+					maxRetries + 1
+				}). Retrying in ${delay}ms...`,
+				error,
+			);
+
 			// Notify client if we're in SSE mode
 			if (sendEvent) {
 				sendEvent("retry", {
@@ -179,9 +257,9 @@ async function callAnthropicWithRetry(params, sendEvent = null, maxRetries = 3, 
 					nextAttemptIn: `${delay / 1000} seconds`,
 				});
 			}
-			
+
 			// Wait before retrying
-			await new Promise(resolve => setTimeout(resolve, delay));
+			await new Promise((resolve) => setTimeout(resolve, delay));
 			retryCount++;
 		}
 	}
@@ -195,31 +273,45 @@ async function callAnthropicWithRetry(params, sendEvent = null, maxRetries = 3, 
  * @param {Number} initialDelay - Initial delay in ms (default: 1000)
  * @returns {Promise<Object>} - The API response
  */
-async function callOpenAIWithRetry(params, sendEvent = null, maxRetries = 3, initialDelay = 1000) {
+async function callOpenAIWithRetry(
+	params,
+	sendEvent = null,
+	maxRetries = 3,
+	initialDelay = 1000,
+) {
 	if (!openaiClient) {
-		throw new Error("OpenAI client not initialized. Please check your API key.");
+		throw new Error(
+			"OpenAI client not initialized. Please check your API key.",
+		);
 	}
-	
+
 	let lastError;
 	let retryCount = 0;
-	
+
 	while (retryCount <= maxRetries) {
 		try {
-			console.log(`Calling OpenAI API (attempt ${retryCount + 1}/${maxRetries + 1})...`);
+			console.log(
+				`Calling OpenAI API (attempt ${retryCount + 1}/${maxRetries + 1})...`,
+			);
 			return await openaiClient.chat.completions.create(params);
 		} catch (error) {
 			lastError = error;
-			
+
 			// If this was our last retry, throw the error
 			if (retryCount >= maxRetries) {
 				console.error(`Failed after ${maxRetries + 1} attempts:`, error);
 				throw error;
 			}
-			
+
 			// Calculate delay with exponential backoff: delay = initialDelay * 2^retryCount
 			const delay = initialDelay * Math.pow(2, retryCount);
-			console.warn(`OpenAI API call failed (attempt ${retryCount + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`, error);
-			
+			console.warn(
+				`OpenAI API call failed (attempt ${retryCount + 1}/${
+					maxRetries + 1
+				}). Retrying in ${delay}ms...`,
+				error,
+			);
+
 			// Notify client if we're in SSE mode
 			if (sendEvent) {
 				sendEvent("retry", {
@@ -230,9 +322,9 @@ async function callOpenAIWithRetry(params, sendEvent = null, maxRetries = 3, ini
 					nextAttemptIn: `${delay / 1000} seconds`,
 				});
 			}
-			
+
 			// Wait before retrying
-			await new Promise(resolve => setTimeout(resolve, delay));
+			await new Promise((resolve) => setTimeout(resolve, delay));
 			retryCount++;
 		}
 	}
@@ -474,8 +566,8 @@ const tools = [
 							description: "An array of field schema objects.",
 							items: {
 								type: "object",
-								description: "Schema field definition"
-							}
+								description: "Schema field definition",
+							},
 						},
 						options: {
 							type: "object",
@@ -687,6 +779,180 @@ const tools = [
 	},
 ];
 
+// Firecrawl Tool Schemas
+const firecrawl_scrape_schema = {
+	name: "firecrawl_scrape_url",
+	description:
+		"Scrapes a single URL and returns its content in specified formats (default is markdown). Use this to get the content of a specific webpage.",
+	input_schema: {
+		type: "object",
+		properties: {
+			url: {
+				type: "string",
+				description: "The URL of the webpage to scrape.",
+			},
+			options: {
+				type: "object",
+				description: "Optional parameters for scraping.",
+				properties: {
+					formats: {
+						type: "array",
+						items: { type: "string", enum: ["markdown", "html"] },
+						description:
+							"Formats to return the content in (e.g., ['markdown']). Defaults to ['markdown'].",
+					},
+					// Add other relevant scrapeOptions from Firecrawl docs if needed
+					pageOptions: {
+						type: "object",
+						description: "Options for page interaction before scraping.",
+						properties: {
+							screenshot: {
+								type: "boolean",
+								description: "Include a screenshot",
+							},
+							waitFor: {
+								type: "number",
+								description: "Wait time in ms after page load",
+							},
+						},
+					},
+					extractorOptions: {
+						type: "object",
+						description: "Options for content extraction",
+						properties: {
+							mode: {
+								type: "string",
+								enum: ["markdown", "llm-extraction"],
+								description: "Extraction mode",
+							},
+							extractionPrompt: {
+								type: "string",
+								description: "Prompt for LLM extraction mode",
+							},
+							extractionSchema: {
+								type: "object",
+								description: "JSON schema for LLM extraction",
+							},
+						},
+					},
+				},
+				required: [], // Options parameters are optional
+			},
+		},
+		required: ["url"],
+	},
+};
+
+const firecrawl_crawl_schema = {
+	name: "firecrawl_crawl_url",
+	description:
+		"Crawls a website starting from a given URL, following links up to a specified limit or depth, and scrapes content from discovered pages. Use this for broader website content gathering.",
+	input_schema: {
+		type: "object",
+		properties: {
+			url: {
+				type: "string",
+				description: "The starting URL to crawl.",
+			},
+			options: {
+				type: "object",
+				description: "Optional parameters for crawling.",
+				properties: {
+					limit: {
+						type: "integer",
+						description: "Maximum number of pages to crawl. Defaults to 1.",
+					},
+					maxDepth: {
+						type: "integer",
+						description:
+							"Maximum depth to crawl. Defaults to no limit if limit is set, otherwise 1.",
+					},
+					includePaths: {
+						type: "array",
+						items: { type: "string" },
+						description:
+							"Glob patterns for URLs to include (e.g., ['/blog/*']).",
+					},
+					excludePaths: {
+						type: "array",
+						items: { type: "string" },
+						description:
+							"Glob patterns for URLs to exclude (e.g., ['/login']).",
+					},
+					scrapeOptions: {
+						type: "object",
+						description: "Scraping options applied to each crawled page.",
+						properties: {
+							formats: {
+								type: "array",
+								items: { type: "string", enum: ["markdown", "html", "screenshot", "screenshot@fullPage"] },
+								description:
+									"Formats for scraped content. Defaults to ['markdown']. Use 'screenshot@fullPage' to get a full page screenshot.",
+							},
+							// pageOptions: { /* ... same as scrape ... */ }, // Reusing schema can be tricky, define explicitly if needed
+							// extractorOptions: { /* ... same as scrape ... */ }
+						},
+					},
+					crawlerOptions: {
+						type: "object",
+						description: "Advanced crawler options",
+						properties: {
+							maxRetries: {
+								type: "integer",
+								description: "Max retries per page",
+							},
+							generateScrapeId: {
+								type: "boolean",
+								description: "Generate unique IDs for scrapes",
+							},
+						},
+					},
+				},
+				required: [],
+			},
+		},
+		required: ["url"],
+	},
+};
+
+const firecrawl_map_schema = {
+	name: "firecrawl_map_url",
+	description:
+		"Generates a site map or structure for a given URL, listing discovered links without scraping their full content. Use this to understand website structure.",
+	input_schema: {
+		type: "object",
+		properties: {
+			url: {
+				type: "string",
+				description: "The URL to generate a map for.",
+			},
+			options: {
+				// mapUrl seems to take fewer options in docs
+				type: "object",
+				description: "Optional parameters for mapping.",
+				properties: {
+					maxDepth: {
+						type: "integer",
+						description: "Maximum depth to map. Defaults to 3.",
+					},
+					includePaths: {
+						type: "array",
+						items: { type: "string" },
+						description: "Glob patterns for URLs to include.",
+					},
+					excludePaths: {
+						type: "array",
+						items: { type: "string" },
+						description: "Glob patterns for URLs to exclude.",
+					},
+				},
+				required: [],
+			},
+		},
+		required: ["url"],
+	},
+};
+
 // --- Tool Execution Logic ---
 // Functions that execute Contentstack SDK calls based on tool name
 async function executeTool(toolName, toolInput) {
@@ -783,8 +1049,16 @@ async function executeTool(toolName, toolInput) {
 				return await entryToUpdate.update({ params: toolInput.params || {} });
 			}
 
+			// Firecrawl Tools
+			case "firecrawl_scrape_url":
+				return await scrapeUrlTool(toolInput);
+			case "firecrawl_crawl_url":
+				return await crawlUrlTool(toolInput);
+			case "firecrawl_map_url":
+				return await mapUrlTool(toolInput);
+
 			default:
-				console.warn(`Tool ${toolName} not found.`);
+				console.error(`Unknown tool: ${toolName}`);
 				return { error: `Tool ${toolName} not implemented.` };
 		}
 	} catch (error) {
@@ -798,42 +1072,111 @@ async function executeTool(toolName, toolInput) {
 	}
 }
 
+// Firecrawl Tool Functions
+async function scrapeUrlTool(input) {
+	if (!firecrawlClient) {
+		return { success: false, error: "Firecrawl client not initialized." };
+	}
+	const { url, options } = input;
+	console.log(`Executing Firecrawl scrape: URL=${url}, Options=`, options);
+	try {
+		// Ensure options is an object even if undefined/null
+		const scrapeParams = options || {};
+		const result = await firecrawlClient.scrapeUrl(url, scrapeParams);
+		console.log("Firecrawl scrape result:", result);
+		// Firecrawl SDK already returns success/error structure
+		return result;
+	} catch (error) {
+		console.error("Error executing Firecrawl scrape:", error);
+		return {
+			success: false,
+			error: error.message || "Unknown error during scrape",
+		};
+	}
+}
+
+async function crawlUrlTool(input) {
+	if (!firecrawlClient) {
+		return { success: false, error: "Firecrawl client not initialized." };
+	}
+	const { url, options } = input;
+	console.log(`Executing Firecrawl crawl: URL=${url}, Options=`, options);
+	try {
+		// Ensure options is an object even if undefined/null
+		const crawlParams = options || {};
+		// Using synchronous crawlUrl as per initial docs example
+		const result = await firecrawlClient.crawlUrl(url, crawlParams);
+		console.log("Firecrawl crawl result:", result);
+		// Firecrawl SDK already returns success/error structure
+		return result;
+	} catch (error) {
+		console.error("Error executing Firecrawl crawl:", error);
+		return {
+			success: false,
+			error: error.message || "Unknown error during crawl",
+		};
+	}
+}
+
+async function mapUrlTool(input) {
+	if (!firecrawlClient) {
+		return { success: false, error: "Firecrawl client not initialized." };
+	}
+	const { url, options } = input;
+	console.log(`Executing Firecrawl map: URL=${url}, Options=`, options);
+	try {
+		// Ensure options is an object even if undefined/null
+		const mapParams = options || {};
+		// Use map() instead of mapUrl() which doesn't exist
+		const result = await firecrawlClient.map(url, mapParams);
+		console.log("Firecrawl map result:", result);
+		// Firecrawl SDK already returns success/error structure
+		return result;
+	} catch (error) {
+		console.error("Error executing Firecrawl map:", error);
+		return {
+			success: false,
+			error: error.message || "Unknown error during map",
+		};
+	}
+}
+
 // New endpoint to get available models
 app.get("/models", (req, res) => {
 	try {
 		const availableModels = {};
-		
+
 		// Add Anthropic models if API key is available
 		if (ANTHROPIC_API_KEY) {
-			Object.keys(ANTHROPIC_MODELS).forEach(modelId => {
+			Object.keys(ANTHROPIC_MODELS).forEach((modelId) => {
 				availableModels[modelId] = ANTHROPIC_MODELS[modelId];
 			});
 		}
-		
+
 		// Add OpenAI models if API key is available
 		if (OPENAI_API_KEY) {
-			Object.keys(OPENAI_MODELS).forEach(modelId => {
+			Object.keys(OPENAI_MODELS).forEach((modelId) => {
 				availableModels[modelId] = OPENAI_MODELS[modelId];
 			});
 		}
-		
+
 		res.json({
 			success: true,
 			models: availableModels,
-			defaultModel: DEFAULT_MODEL
+			defaultModel: DEFAULT_MODEL,
 		});
 	} catch (error) {
 		console.error("Error getting models:", error);
 		res.status(500).json({
 			success: false,
 			error: "Failed to retrieve models",
-			details: error.message
+			details: error.message,
 		});
 	}
 });
 
 // Endpoint for chat functionality
-app.post('/chat', upload.single('image'), async (req, res) => {
+app.post("/chat", upload.single("image"), async (req, res) => {
 	try {
 		console.log("Received chat request");
 
@@ -841,35 +1184,51 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 		const message = req.body.message;
 		const imageUrl = req.body.imageUrl; // Extract imageUrl from the request
 		const modelId = req.body.model || DEFAULT_MODEL; // Get requested model or use default
-		
+		const conversationHistory = req.body.conversationHistory
+			? JSON.parse(req.body.conversationHistory)
+			: [];
+		const currentTabUrl = req.body.currentTabUrl || null;
+
+		console.log(
+			`Received conversation history with ${conversationHistory.length} messages`,
+		);
+		if (currentTabUrl) {
+			console.log(`Current tab URL: ${currentTabUrl}`);
+		}
+
 		// Get model info
 		const isAnthropicModel = ANTHROPIC_MODELS[modelId] !== undefined;
 		const isOpenAIModel = OPENAI_MODELS[modelId] !== undefined;
-		
+
 		// Check if requested model is available
 		if (isAnthropicModel && !ANTHROPIC_API_KEY) {
 			return res.status(400).json({
-				error: "Selected Anthropic model is not available. Anthropic API key is missing."
+				error:
+					"Selected Anthropic model is not available. Anthropic API key is missing.",
 			});
 		}
-		
+
 		if (isOpenAIModel && !OPENAI_API_KEY) {
 			return res.status(400).json({
-				error: "Selected OpenAI model is not available. OpenAI API key is missing."
+				error:
+					"Selected OpenAI model is not available. OpenAI API key is missing.",
 			});
 		}
-		
+
 		if (!isAnthropicModel && !isOpenAIModel) {
 			return res.status(400).json({
-				error: `Unknown model: ${modelId}`
+				error: `Unknown model: ${modelId}`,
 			});
 		}
-		
+
 		console.log(`Using model: ${modelId}`);
-		
+
 		// Get uploaded file if any
 		const uploadedFile = req.file;
-		console.log("Uploaded file:", uploadedFile ? uploadedFile.filename : "None");
+		console.log(
+			"Uploaded file:",
+			uploadedFile ? uploadedFile.filename : "None",
+		);
 
 		if (!message && !imageUrl && !uploadedFile) {
 			return res.status(400).json({ error: "Message or image is required" });
@@ -895,6 +1254,8 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 					hasImageUrl: !!imageUrl,
 					hasUploadedFile: !!uploadedFile,
 					model: modelId,
+					historyLength: conversationHistory.length,
+					currentTabUrl: currentTabUrl,
 				},
 				null,
 				2,
@@ -915,7 +1276,7 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 		// Process image content if any
 		let base64Data = null;
 		let mediaType = null;
-		
+
 		// Process the file if uploaded
 		if (uploadedFile) {
 			console.log("Processing uploaded file for chat message");
@@ -923,12 +1284,14 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 				// Read the file content
 				const filePath = uploadedFile.path;
 				const fileData = fs.readFileSync(filePath);
-				base64Data = fileData.toString('base64');
-				
+				base64Data = fileData.toString("base64");
+
 				// Determine media type from file mimetype
-				mediaType = uploadedFile.mimetype || 'image/png';
-				
-				console.log(`Successfully read uploaded file, size: ${fileData.length} bytes`);
+				mediaType = uploadedFile.mimetype || "image/png";
+
+				console.log(
+					`Successfully read uploaded file, size: ${fileData.length} bytes`,
+				);
 			} catch (fileError) {
 				console.error("Error processing uploaded file:", fileError);
 				sendEvent("error", {
@@ -946,7 +1309,7 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 			// If it's already a data URL
 			if (imageUrl.startsWith("data:image/")) {
 				console.log("Processing data URL for chat");
-				mediaType = imageUrl.split(';')[0].split(':')[1] || 'image/png';
+				mediaType = imageUrl.split(";")[0].split(":")[1] || "image/png";
 				base64Data = imageUrl.split(",")[1];
 			} else if (imageUrl.startsWith("http")) {
 				console.log("Processing HTTP URL for chat");
@@ -964,9 +1327,9 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 					// Get the image as buffer and convert to base64
 					const imageBuffer = await response.buffer();
 					base64Data = imageBuffer.toString("base64");
-					
+
 					// Determine media type from Content-Type header or default to image/png
-					mediaType = response.headers.get('content-type') || 'image/png';
+					mediaType = response.headers.get("content-type") || "image/png";
 
 					console.log(
 						`Successfully fetched and converted image from URL, size: ${imageBuffer.length} bytes`,
@@ -1025,12 +1388,12 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 							properties: {
 								title: { type: "string" },
 								uid: { type: "string" },
-								schema: { 
+								schema: {
 									type: "array",
 									items: {
 										type: "object",
-										description: "Schema field definition"
-									}
+										description: "Schema field definition",
+									},
 								},
 								options: { type: "object" },
 							},
@@ -1104,11 +1467,50 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 			},
 		];
 
-		// *** Handle Different AI Providers ***
-		if (isAnthropicModel) {
-			await handleAnthropicChat(modelId, message, base64Data, mediaType, tools, sendEvent, res);
-		} else if (isOpenAIModel) {
-			await handleOpenAIChat(modelId, message, base64Data, mediaType, tools, sendEvent, res);
+		// Add Firecrawl tools if client is initialized
+		if (firecrawlClient) {
+			console.log("Adding Firecrawl tools to available tools list");
+			tools.push(firecrawl_scrape_schema);
+			tools.push(firecrawl_crawl_schema);
+			tools.push(firecrawl_map_schema);
+		} else {
+			console.log("Firecrawl client not initialized, skipping Firecrawl tools");
+		}
+
+		// Process request based on model provider
+		try {
+			if (isAnthropicModel) {
+				await handleAnthropicChat(
+					modelId,
+					message,
+					base64Data,
+					mediaType,
+					tools,
+					sendEvent,
+					res,
+					conversationHistory,
+					currentTabUrl,
+				);
+			} else if (isOpenAIModel) {
+				await handleOpenAIChat(
+					modelId,
+					message,
+					base64Data,
+					mediaType,
+					tools,
+					sendEvent,
+					res,
+					conversationHistory,
+					currentTabUrl,
+				);
+			}
+		} catch (processingError) {
+			console.error("Error processing chat:", processingError);
+			sendEvent("error", {
+				error: "Failed to process chat",
+				details: processingError.message,
+			});
+			res.end();
 		}
 	} catch (error) {
 		console.error("Error processing chat:", error);
@@ -1152,9 +1554,74 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 /**
  * Handle chat request using Anthropic API
  */
-async function handleAnthropicChat(modelId, message, base64Data, mediaType, tools, sendEvent, res) {
+async function handleAnthropicChat(
+	modelId,
+	message,
+	base64Data,
+	mediaType,
+	tools,
+	sendEvent,
+	res,
+	conversationHistory,
+	currentTabUrl,
+) {
 	try {
 		// Prepare initial messages
+		const messages = [];
+
+		// Process conversation history if available
+		if (conversationHistory && conversationHistory.length > 0) {
+			console.log(
+				`Processing ${conversationHistory.length} historical messages for Anthropic API`,
+			);
+
+			// Convert our conversation history format to Anthropic's format
+			// Skip the latest user message as we'll add it separately
+			for (let i = 0; i < conversationHistory.length - 1; i++) {
+				const histMsg = conversationHistory[i];
+				const content = [];
+
+				// Add image if the message has one (for user messages)
+				if (
+					histMsg.role === "user" &&
+					histMsg.imageUrl &&
+					histMsg.imageUrl.startsWith("data:image/")
+				) {
+					try {
+						const mediaType = histMsg.imageUrl.split(";")[0].split(":")[1];
+						const base64Data = histMsg.imageUrl.split(",")[1];
+
+						content.push({
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: mediaType,
+								data: base64Data,
+							},
+						});
+					} catch (err) {
+						console.log("Could not include historical image:", err.message);
+					}
+				}
+
+				// Add text content
+				if (histMsg.content) {
+					content.push({
+						type: "text",
+						text: histMsg.content,
+					});
+				}
+
+				if (content.length > 0) {
+					messages.push({
+						role: histMsg.role,
+						content: content,
+					});
+				}
+			}
+		}
+
+		// Create the current user message
 		const content = [];
 
 		// Add image if available
@@ -1169,18 +1636,27 @@ async function handleAnthropicChat(modelId, message, base64Data, mediaType, tool
 			});
 		}
 
-		// Add the text message
-		content.push({
-			type: "text",
-			text: message || "", // Empty string if no message
-		});
+		// Add current tab URL context if available
+		if (currentTabUrl) {
+			content.push({
+				type: "text",
+				text: `I'm currently viewing this page: ${currentTabUrl}\n\n${
+					message || ""
+				}`,
+			});
+		} else {
+			// Add the text message without URL context
+			content.push({
+				type: "text",
+				text: message || "", // Empty string if no message
+			});
+		}
 
-		const messages = [
-			{
-				role: "user",
-				content: content,
-			},
-		];
+		// Add the user message to our messages array
+		messages.push({
+			role: "user",
+			content: content,
+		});
 
 		// *** Tool Use Loop ***
 		let apiResponse;
@@ -1190,13 +1666,14 @@ async function handleAnthropicChat(modelId, message, base64Data, mediaType, tool
 			console.log(
 				`Calling Anthropic API... Messages count: ${messages.length}`,
 			);
-			
+
 			try {
 				// Use callAnthropicWithRetry
-				apiResponse = await callAnthropicWithRetry({
-					model: modelId,
-					max_tokens: 4096,
-					system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
+				apiResponse = await callAnthropicWithRetry(
+					{
+						model: modelId,
+						max_tokens: 4096,
+						system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
 
 <dont mention this ever>          
 You are a fast-talking expert that gets straight to the point. You are not friendly or outgoing. You arent concerned with pleasantries or unnecessary small talk or details unles specifically asked for.
@@ -1232,11 +1709,16 @@ When a user requests website analysis:
 - **When using Contentstack tools, clearly state which tool you are using and why.**
 - **Handle potential errors from tools gracefully and inform the user.**
 `,
-					messages: messages,
-					tools: tools, // Pass the defined tools here
-				}, sendEvent); // Pass the sendEvent function for SSE notifications
+						messages: messages,
+						tools: tools, // Pass the defined tools here
+					},
+					sendEvent,
+				); // Pass the sendEvent function for SSE notifications
 			} catch (err) {
-				console.error("Failed to complete Anthropic API call after retries:", err);
+				console.error(
+					"Failed to complete Anthropic API call after retries:",
+					err,
+				);
 				sendEvent("error", {
 					error: "Failed to complete chat request after multiple attempts",
 					details: err.message,
@@ -1245,9 +1727,7 @@ When a user requests website analysis:
 				return;
 			}
 
-			console.log(
-				`Anthropic response stop_reason: ${apiResponse.stop_reason}`,
-			);
+			console.log(`Anthropic response stop_reason: ${apiResponse.stop_reason}`);
 
 			// Check if the response requires tool use
 			if (apiResponse.stop_reason === "tool_use") {
@@ -1359,11 +1839,21 @@ When a user requests website analysis:
 /**
  * Handle chat request using OpenAI API
  */
-async function handleOpenAIChat(modelId, message, base64Data, mediaType, tools, sendEvent, res) {
+async function handleOpenAIChat(
+	modelId,
+	message,
+	base64Data,
+	mediaType,
+	tools,
+	sendEvent,
+	res,
+	conversationHistory,
+	currentTabUrl,
+) {
 	try {
 		// Prepare messages for OpenAI
 		const messages = [];
-		
+
 		// Add system message
 		messages.push({
 			role: "system",
@@ -1380,66 +1870,138 @@ You are a fast-talking expert that gets straight to the point. You are not frien
 3. **Tool Utilization**: You have access to and can effectively use:
    - **CMS Tools**: You can interact with a Contentstack stack to get, create, and update content types and entries using the available tools.
 
-4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.`
+4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.`,
 		});
-		
-		// Build user message content
+
+		// Process conversation history if available
+		if (conversationHistory && conversationHistory.length > 0) {
+			console.log(
+				`Processing ${conversationHistory.length} historical messages for OpenAI API`,
+			);
+
+			// Convert our conversation history format to OpenAI's format
+			// Skip the latest user message as we'll add it separately
+			for (let i = 0; i < conversationHistory.length - 1; i++) {
+				const histMsg = conversationHistory[i];
+
+				if (histMsg.role === "user") {
+					if (histMsg.imageUrl) {
+						// For user messages with images, create a content array
+						const content = [];
+
+						// Add image if available (note: historical images might not be accessible)
+						if (
+							histMsg.imageUrl &&
+							histMsg.imageUrl.startsWith("data:image/")
+						) {
+							const mediaType = histMsg.imageUrl.split(";")[0].split(":")[1];
+							const base64Data = histMsg.imageUrl.split(",")[1];
+
+							content.push({
+								type: "image_url",
+								image_url: {
+									url: `data:${mediaType};base64,${base64Data}`,
+								},
+							});
+						}
+
+						// Add text content
+						content.push({
+							type: "text",
+							text: histMsg.content || "",
+						});
+
+						messages.push({
+							role: "user",
+							content: content,
+						});
+					} else {
+						// Simple text-only user message
+						messages.push({
+							role: "user",
+							content: histMsg.content,
+						});
+					}
+				} else if (histMsg.role === "assistant") {
+					// Assistant messages are always text
+					messages.push({
+						role: "assistant",
+						content: histMsg.content,
+					});
+				}
+			}
+		}
+
+		// Build current user message content
 		const userMessage = { role: "user", content: [] };
-		
+
 		// Add image if available
 		if (base64Data && mediaType) {
 			userMessage.content.push({
 				type: "image_url",
 				image_url: {
-					url: `data:${mediaType};base64,${base64Data}`
-				}
+					url: `data:${mediaType};base64,${base64Data}`,
+				},
 			});
 		}
-		
-		// Add text message
-		userMessage.content.push({
-			type: "text", 
-			text: message || ""
-		});
-		
+
+		// Add current tab URL context if available
+		if (currentTabUrl) {
+			userMessage.content.push({
+				type: "text",
+				text: `I'm currently viewing this page: ${currentTabUrl}\n\n${
+					message || ""
+				}`,
+			});
+		} else {
+			// Add text message without URL context
+			userMessage.content.push({
+				type: "text",
+				text: message || "",
+			});
+		}
+
 		messages.push(userMessage);
-		
+
 		// Convert Anthropic tool format to OpenAI function calling format
-		const openAIFunctions = tools.map(tool => ({
+		const openAIFunctions = tools.map((tool) => ({
 			type: "function",
 			function: {
 				name: tool.name,
 				description: tool.description,
-				parameters: tool.input_schema
-			}
+				parameters: tool.input_schema,
+			},
 		}));
-		
+
 		// Call OpenAI API
 		console.log(`Calling OpenAI API with model ${modelId}...`);
-		
+
 		try {
-			const completion = await callOpenAIWithRetry({
-				model: modelId,
-				messages: messages,
-				tools: openAIFunctions,
-				temperature: 0.7,
-				max_tokens: 4096,
-				tool_choice: "auto"
-			}, sendEvent);
-			
+			const completion = await callOpenAIWithRetry(
+				{
+					model: modelId,
+					messages: messages,
+					tools: openAIFunctions,
+					temperature: 0.7,
+					max_tokens: 4096,
+					tool_choice: "auto",
+				},
+				sendEvent,
+			);
+
 			console.log("OpenAI response received");
-			
+
 			// Handle tool calls
 			let currentResponse = completion;
 			const fullMessages = [...messages]; // Track all messages for subsequent calls
-						
+
 			// While the model wants to call tools
 			while (currentResponse.choices[0].message.tool_calls) {
 				// Add assistant response to message history
 				fullMessages.push(currentResponse.choices[0].message);
-				
+
 				const toolCalls = currentResponse.choices[0].message.tool_calls;
-				
+
 				// Send tool usage events to client
 				for (const toolCall of toolCalls) {
 					const functionName = toolCall.function.name;
@@ -1449,74 +2011,79 @@ You are a fast-talking expert that gets straight to the point. You are not frien
 						description: `Using tool: ${functionName}`,
 					});
 				}
-				
+
 				// Execute each tool call
 				const toolResults = [];
 				for (const toolCall of toolCalls) {
 					const functionName = toolCall.function.name;
 					const functionArgs = JSON.parse(toolCall.function.arguments);
-					
+
 					try {
 						const result = await executeTool(functionName, functionArgs);
-						
+
 						// Send completion event
 						sendEvent("tool", {
 							name: functionName,
 							status: "completed",
 							description: `Tool ${functionName} completed successfully`,
 						});
-						
+
 						// Add result to messages
 						toolResults.push({
 							role: "tool",
 							tool_call_id: toolCall.id,
 							name: functionName,
-							content: JSON.stringify(result)
+							content: JSON.stringify(result),
 						});
 					} catch (toolError) {
 						console.error(`Error executing tool ${functionName}:`, toolError);
-						
+
 						// Send tool error event
 						sendEvent("tool", {
 							name: functionName,
 							status: "failed",
 							description: `Tool ${functionName} failed: ${toolError.message}`,
 						});
-						
+
 						// Add error result
 						toolResults.push({
 							role: "tool",
 							tool_call_id: toolCall.id,
 							name: functionName,
-							content: JSON.stringify({ error: toolError.message })
+							content: JSON.stringify({ error: toolError.message }),
 						});
 					}
 				}
-				
+
 				// Add all tool results to messages
 				fullMessages.push(...toolResults);
-				
+
 				// Call API again with updated messages
-				currentResponse = await callOpenAIWithRetry({
-					model: modelId,
-					messages: fullMessages,
-					tools: openAIFunctions,
-					temperature: 0.7,
-					max_tokens: 4096,
-				}, sendEvent);
+				currentResponse = await callOpenAIWithRetry(
+					{
+						model: modelId,
+						messages: fullMessages,
+						tools: openAIFunctions,
+						temperature: 0.7,
+						max_tokens: 4096,
+					},
+					sendEvent,
+				);
 			}
-			
+
 			// Extract final content
 			const finalContent = currentResponse.choices[0].message.content;
-			
-			console.log(`Chat response successful. Response length: ${finalContent.length} chars`);
-			
+
+			console.log(
+				`Chat response successful. Response length: ${finalContent.length} chars`,
+			);
+
 			// Send final response
 			sendEvent("complete", {
 				success: true,
 				content: finalContent,
 			});
-			
+
 			// End the response
 			res.end();
 		} catch (err) {
@@ -1537,13 +2104,8 @@ You are a fast-talking expert that gets straight to the point. You are not frien
 	}
 }
 
-// Start the server
-app.listen(PORT, () => {
-	console.log(`Server is running on http://localhost:${PORT}`);
-	console.log(`Images will be available at http://localhost:${PORT}/images/`);
-	
-	// Log available models
-	const anthropicModelsAvailable = ANTHROPIC_API_KEY ? Object.keys(ANTHROPIC_MODELS).length : 0;
-	const openaiModelsAvailable = OPENAI_API_KEY ? Object.keys(OPENAI_MODELS).length : 0;
-	console.log(`Available models: ${anthropicModelsAvailable} Anthropic models, ${openaiModelsAvailable} OpenAI models`);
+// Start everything
+main().catch((error) => {
+	console.error("Failed to start server:", error);
+	process.exit(1);
 });
