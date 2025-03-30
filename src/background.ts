@@ -191,6 +191,46 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
+// Handle full page capture request
+async function handleCaptureFullPage(
+  tabId: number | undefined,
+  sendResponse: Function
+): Promise<void> {
+  log("Handling full page capture for tab", tabId);
+
+  if (!tabId) {
+    logError("No tab ID provided for full page capture");
+    sendResponse({ status: "error", message: "No tab ID" });
+    return;
+  }
+
+  // Check if the tab is a restricted URL
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (isRestrictedUrl(tab.url)) {
+      logError("Cannot capture on restricted URL:", tab.url);
+      sendResponse(RESTRICTED_URL_ERROR);
+      return;
+    }
+
+    // Capture the visible tab
+    const screenshot = await chrome.tabs.captureVisibleTab({ format: "png" });
+
+    // Send the screenshot data back immediately
+    sendResponse({
+      status: "ok",
+      dataUrl: screenshot,
+      message: "Full page screenshot captured successfully",
+    });
+  } catch (err) {
+    logError("Error capturing full page:", err);
+    sendResponse({
+      status: "error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // Handle start selection action
 function handleStartSelection(tabId: number | undefined, sendResponse: Function): void {
   log("Handling startSelection for tab", tabId);
@@ -445,6 +485,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleAnalyzeImage(message.imageUrl, sendResponse, message.customPrompt);
       return true;
 
+    case "captureFullPage":
+      if (isFromSidePanel) {
+        // Get the current active tab
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs.length > 0 && tabs[0].id) {
+            log(
+              "Handling full page capture request from side panel for tab:",
+              tabs[0].id
+            );
+            handleCaptureFullPage(tabs[0].id, sendResponse);
+          } else {
+            logError("No active tab found for full page capture");
+            sendResponse({ status: "error", message: "No active tab found" });
+          }
+        });
+        return true; // Keep response channel open for async operation
+      } else {
+        // If from content script, use the sender tab
+        handleCaptureFullPage(sender.tab?.id, sendResponse);
+        return true; // Keep response channel open
+      }
+
     case "toggleSelectionMode":
       if (isFromSidePanel && typeof message.active === "boolean") {
         // Request from sidepanel to toggle selection
@@ -506,8 +568,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case "sendChatMessage":
-      handleChatMessage(message.message, sendResponse, message.imageUrl);
+      handleChatMessage(message.message, sendResponse, message.imageUrl, message.model);
       return true;
+
+    case "clearHistory":
+      log("Clearing capture history from storage");
+      chrome.storage.local.remove("captureHistory", () => {
+        if (chrome.runtime.lastError) {
+          logError("Error clearing storage:", chrome.runtime.lastError);
+          sendResponse({ status: "error", message: "Failed to clear history." });
+        } else {
+          log("Successfully cleared capture history");
+          // Notify side panel that history has been cleared
+          chrome.runtime.sendMessage({
+            action: "clearHistoryComplete",
+          });
+          sendResponse({ status: "success" });
+        }
+      });
+      return true; // Keep the message channel open for the async response
 
     default:
       // Enhanced logging for unknown actions
@@ -516,7 +595,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: "error", message: "Unknown action" });
   }
 
-  return true; // Keep the channel open for future responses
+  // Default return false if no async operation requires keeping the channel open
+  return false;
 });
 
 // Handle process selection action (replaces captureSelection)
@@ -781,45 +861,21 @@ try {
   logError("[Diagnostic] Error initializing commands listener:", error);
 }
 
-// --- Basic Test Listeners ---
-// These are to test if the service worker can wake up for various events
-
-// Listen for browser startup (service worker will start if browser starts)
-chrome.runtime.onStartup.addListener(() => {
-  console.log("WAKE UP TEST: Browser started.");
-});
-
-// Listen for tab updates
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  console.log("WAKE UP TEST: Tab updated", tabId);
-});
-
-// Create a simple alarm that fires one time in 5 seconds after load
-try {
-  if (chrome.alarms) {
-    chrome.alarms.create("wakeupTest", {
-      delayInMinutes: 0.1, // 6 seconds
-    });
-
-    // Listen for the alarm
-    chrome.alarms.onAlarm.addListener((alarm) => {
-      console.log("WAKE UP TEST: Alarm triggered:", alarm.name);
-    });
-    log("Alarms API initialized successfully");
-  } else {
-    log("chrome.alarms API not available");
-  }
-} catch (error) {
-  logError("Error initializing alarms:", error);
-}
-
 // Handle chat message request
 async function handleChatMessage(
   message: string,
   sendResponse: Function,
-  imageUrl: string | null = null
+  imageUrl: string | null = null,
+  model: string | null = null
 ): Promise<void> {
-  log("Handling chat message:", message, "with image:", !!imageUrl);
+  log(
+    "Handling chat message:",
+    message,
+    "with image:",
+    !!imageUrl,
+    "using model:",
+    model
+  );
 
   if (!message && !imageUrl) {
     logError("No message or image provided for chat");
@@ -830,7 +886,7 @@ async function handleChatMessage(
   try {
     log("Sending message to chat endpoint" + (imageUrl ? " with image" : ""));
 
-    // *** Use the exact same approach as handleAnalyzeImage to ensure consistency ***
+    // Create FormData to send to the server
     const formData = new FormData();
     formData.append("message", message || "");
 
@@ -842,9 +898,12 @@ async function handleChatMessage(
       // For chat, it's safer to just pass the raw image URL rather than trying to convert it
       formData.append("imageUrl", imageUrl);
       log("Image URL added to form data directly");
+    }
 
-      // Note: We're skipping the blob conversion because it's causing errors
-      // The server should be able to handle the data URL directly
+    // Add model parameter if provided
+    if (model) {
+      formData.append("model", model);
+      log("Using model:", model);
     }
 
     // Log form data entries for debugging

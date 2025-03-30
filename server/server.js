@@ -9,7 +9,60 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { v4: uuidv4 } = require("uuid");
 const Anthropic = require("@anthropic-ai/sdk");
+const OpenAI = require("openai");
 const contentstack = require("@contentstack/management"); // Import Contentstack SDK
+
+// Define available models by provider
+const ANTHROPIC_MODELS = {
+	"claude-3-7-sonnet-20250219": {
+		name: "Claude 3.7 Sonnet",
+		provider: "anthropic",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"claude-3-opus-20240229": {
+		name: "Claude 3 Opus",
+		provider: "anthropic",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"claude-3-sonnet-20240229": {
+		name: "Claude 3 Sonnet",
+		provider: "anthropic",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"claude-3-haiku-20240307": {
+		name: "Claude 3 Haiku",
+		provider: "anthropic",
+		supportsVision: true, 
+		maxTokens: 4096,
+	},
+};
+
+const OPENAI_MODELS = {
+	"gpt-4o": {
+		name: "GPT-4o",
+		provider: "openai",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"gpt-4-turbo": {
+		name: "GPT-4 Turbo",
+		provider: "openai",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+	"gpt-3.5-turbo": {
+		name: "GPT-3.5 Turbo",
+		provider: "openai",
+		supportsVision: true,
+		maxTokens: 4096,
+	},
+};
+
+// Default model
+const DEFAULT_MODEL = "claude-3-7-sonnet-20250219";
 
 // Create Express app
 const app = express();
@@ -17,6 +70,7 @@ const PORT = process.env.PORT || 3000;
 
 // --- Environment Variable Checks ---
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const CONTENTSTACK_API_KEY = process.env.CONTENTSTACK_API_KEY; // Stack API Key
 const CONTENTSTACK_MANAGEMENT_TOKEN = process.env.CONTENTSTACK_MANAGEMENT_TOKEN; // Stack Management Token
 const CONTENTSTACK_HOST =
@@ -24,14 +78,42 @@ const CONTENTSTACK_HOST =
 const CONTENTSTACK_REGION = process.env.CONTENTSTACK_REGION; // Optional: e.g., 'us-east-1', 'eu-central-1'
 
 if (!ANTHROPIC_API_KEY) {
-	console.error("Missing ANTHROPIC_API_KEY environment variable");
-	process.exit(1); // Exit if critical env var is missing
+	console.error("Warning: Missing ANTHROPIC_API_KEY environment variable - Anthropic models will not be available");
 }
+
+if (!OPENAI_API_KEY) {
+	console.error("Warning: Missing OPENAI_API_KEY environment variable - OpenAI models will not be available");
+}
+
+if (!ANTHROPIC_API_KEY && !OPENAI_API_KEY) {
+	console.error("Error: No API keys provided for any AI providers");
+	process.exit(1); // Exit if no API keys are available
+}
+
 if (!CONTENTSTACK_API_KEY || !CONTENTSTACK_MANAGEMENT_TOKEN) {
 	console.error(
 		"Missing CONTENTSTACK_API_KEY or CONTENTSTACK_MANAGEMENT_TOKEN environment variable",
 	);
 	process.exit(1); // Exit if critical env vars are missing
+}
+
+// --- Initialize clients ---
+// Initialize Anthropic client if API key is available
+let anthropicClient = null;
+if (ANTHROPIC_API_KEY) {
+	anthropicClient = new Anthropic({
+		apiKey: ANTHROPIC_API_KEY,
+	});
+	console.log("Anthropic client initialized successfully");
+}
+
+// Initialize OpenAI client if API key is available
+let openaiClient = null;
+if (OPENAI_API_KEY) {
+	openaiClient = new OpenAI({
+		apiKey: OPENAI_API_KEY,
+	});
+	console.log("OpenAI client initialized successfully");
 }
 
 // --- Initialize Contentstack Client ---
@@ -52,6 +134,109 @@ console.log(
 		CONTENTSTACK_REGION ? ", Region: " + CONTENTSTACK_REGION : ""
 	}`,
 );
+
+// --- Anthropic API with retry logic ---
+/**
+ * Calls Anthropic API with retry logic and exponential backoff
+ * @param {Object} params - The parameters for the Anthropic API call
+ * @param {Function} sendEvent - Optional function to send events to client for chat SSE
+ * @param {Number} maxRetries - Maximum number of retries (default: 3)
+ * @param {Number} initialDelay - Initial delay in ms (default: 1000)
+ * @returns {Promise<Object>} - The API response
+ */
+async function callAnthropicWithRetry(params, sendEvent = null, maxRetries = 3, initialDelay = 1000) {
+	if (!anthropicClient) {
+		throw new Error("Anthropic client not initialized. Please check your API key.");
+	}
+	
+	let lastError;
+	let retryCount = 0;
+	
+	while (retryCount <= maxRetries) {
+		try {
+			console.log(`Calling Anthropic API (attempt ${retryCount + 1}/${maxRetries + 1})...`);
+			return await anthropicClient.messages.create(params);
+		} catch (error) {
+			lastError = error;
+			
+			// If this was our last retry, throw the error
+			if (retryCount >= maxRetries) {
+				console.error(`Failed after ${maxRetries + 1} attempts:`, error);
+				throw error;
+			}
+			
+			// Calculate delay with exponential backoff: delay = initialDelay * 2^retryCount
+			const delay = initialDelay * Math.pow(2, retryCount);
+			console.warn(`Anthropic API call failed (attempt ${retryCount + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`, error);
+			
+			// Notify client if we're in SSE mode
+			if (sendEvent) {
+				sendEvent("retry", {
+					attempt: retryCount + 1,
+					maxRetries: maxRetries,
+					delay: delay,
+					error: error.message,
+					nextAttemptIn: `${delay / 1000} seconds`,
+				});
+			}
+			
+			// Wait before retrying
+			await new Promise(resolve => setTimeout(resolve, delay));
+			retryCount++;
+		}
+	}
+}
+
+/**
+ * Calls OpenAI API with retry logic and exponential backoff
+ * @param {Object} params - The parameters for the OpenAI API call
+ * @param {Function} sendEvent - Optional function to send events to client for chat SSE
+ * @param {Number} maxRetries - Maximum number of retries (default: 3)
+ * @param {Number} initialDelay - Initial delay in ms (default: 1000)
+ * @returns {Promise<Object>} - The API response
+ */
+async function callOpenAIWithRetry(params, sendEvent = null, maxRetries = 3, initialDelay = 1000) {
+	if (!openaiClient) {
+		throw new Error("OpenAI client not initialized. Please check your API key.");
+	}
+	
+	let lastError;
+	let retryCount = 0;
+	
+	while (retryCount <= maxRetries) {
+		try {
+			console.log(`Calling OpenAI API (attempt ${retryCount + 1}/${maxRetries + 1})...`);
+			return await openaiClient.chat.completions.create(params);
+		} catch (error) {
+			lastError = error;
+			
+			// If this was our last retry, throw the error
+			if (retryCount >= maxRetries) {
+				console.error(`Failed after ${maxRetries + 1} attempts:`, error);
+				throw error;
+			}
+			
+			// Calculate delay with exponential backoff: delay = initialDelay * 2^retryCount
+			const delay = initialDelay * Math.pow(2, retryCount);
+			console.warn(`OpenAI API call failed (attempt ${retryCount + 1}/${maxRetries + 1}). Retrying in ${delay}ms...`, error);
+			
+			// Notify client if we're in SSE mode
+			if (sendEvent) {
+				sendEvent("retry", {
+					attempt: retryCount + 1,
+					maxRetries: maxRetries,
+					delay: delay,
+					error: error.message,
+					nextAttemptIn: `${delay / 1000} seconds`,
+				});
+			}
+			
+			// Wait before retrying
+			await new Promise(resolve => setTimeout(resolve, delay));
+			retryCount++;
+		}
+	}
+}
 
 // Set up middleware
 app.use(cors());
@@ -287,7 +472,10 @@ const tools = [
 						schema: {
 							type: "array",
 							description: "An array of field schema objects.",
-							items: { type: "object" },
+							items: {
+								type: "object",
+								description: "Schema field definition"
+							}
 						},
 						options: {
 							type: "object",
@@ -610,418 +798,36 @@ async function executeTool(toolName, toolInput) {
 	}
 }
 
-// Endpoint for analyzing images (legacy support)
-app.post("/analyze-image", upload.none(), async (req, res) => {
+// New endpoint to get available models
+app.get("/models", (req, res) => {
 	try {
-		console.log("Received analyze-image request");
-
-		// Get image URL from form data
-		const imageUrl = req.body.imageUrl;
-		const prompt =
-			req.body.prompt ||
-			"Describe what's in this image and extract any text content.";
-
-		if (!imageUrl) {
-			return res.status(400).json({ error: "Image URL is required" });
-		}
-
-		console.log(`Received imageUrl: ${imageUrl.substring(0, 50)}...`);
-
-		// Log the request for debugging
-		const timestamp = new Date().toISOString().replace(/:/g, "-");
-		const logPath = path.join(
-			uploadsDir,
-			`image_analysis_request_${timestamp}.log`,
-		);
-		fs.writeFileSync(
-			logPath,
-			JSON.stringify(
-				{
-					timestamp: new Date().toISOString(),
-					prompt: prompt,
-					imageUrlStart: `${imageUrl.substring(0, 50)}...`,
-				},
-				null,
-				2,
-			),
-		);
-
-		// Fetch the image from the URL
-		let base64Data;
-
-		// If it's already a data URL
-		if (imageUrl.startsWith("data:image/")) {
-			console.log("Processing data URL");
-			base64Data = imageUrl.split(",")[1];
-		} else if (imageUrl.startsWith("http")) {
-			console.log("Processing HTTP URL");
-			try {
-				// For HTTP URLs, we need to fetch the image content
-				const fetch = require("node-fetch");
-				const response = await fetch(imageUrl);
-
-				if (!response.ok) {
-					throw new Error(
-						`Failed to fetch image: ${response.status} ${response.statusText}`,
-					);
-				}
-
-				// Get the image as buffer and convert to base64
-				const imageBuffer = await response.buffer();
-				base64Data = imageBuffer.toString("base64");
-
-				console.log(
-					`Successfully fetched and converted image from URL, size: ${imageBuffer.length} bytes`,
-				);
-			} catch (fetchError) {
-				console.error("Error fetching image:", fetchError);
-				return res.status(400).json({
-					error: "Failed to fetch image from URL",
-					details: fetchError.message,
-				});
-			}
-		} else {
-			console.error("Invalid image URL format:", imageUrl.substring(0, 50));
-			return res.status(400).json({
-				error:
-					'Invalid image URL format. Must be a data URL starting with "data:image/" or an HTTP URL',
-				details: "The provided URL was not recognized as a valid format.",
+		const availableModels = {};
+		
+		// Add Anthropic models if API key is available
+		if (ANTHROPIC_API_KEY) {
+			Object.keys(ANTHROPIC_MODELS).forEach(modelId => {
+				availableModels[modelId] = ANTHROPIC_MODELS[modelId];
 			});
 		}
-
-		if (!base64Data) {
-			return res.status(400).json({ error: "Failed to extract image data" });
-		}
-
-		// Initialize Anthropic client
-		const anthropic = new Anthropic({
-			apiKey: ANTHROPIC_API_KEY,
-		});
-
-		// Prepare initial messages
-		const messages = [
-			{
-				role: "user",
-				content: [
-					{
-						type: "image",
-						source: {
-							type: "base64",
-							media_type: "image/png", // Assuming PNG, adjust if needed
-							data: base64Data,
-						},
-					},
-					{
-						type: "text",
-						text: prompt,
-					},
-				],
-			},
-		];
-
-		// *** Tool Use Loop ***
-		let apiResponse;
-		while (true) {
-			console.log(
-				`Calling Anthropic API... Messages count: ${messages.length}`,
-			);
-			apiResponse = await anthropic.messages.create({
-				model: "claude-3-5-sonnet-20240620", // Using 3.5 Sonnet for better tool use
-				max_tokens: 4096,
-				system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
-
-## Core Capabilities
-
-1. **Website Analysis**: You can analyze websites to identify their CMS platform, content structure, information architecture, and technical implementation details.
-
-2. **Data Modeling**: You excel at modeling complex content relationships, taxonomies, and metadata structures to help users understand and optimize their content ecosystems.
-
-3. **Tool Utilization**: You have access to and can effectively use:
-   - **CMS Tools**: You can interact with a Contentstack stack to get, create, and update content types and entries using the available tools.
-
-4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.
-
-## Interaction Protocol
-
-When a user requests website analysis:
-1. Gather the website URL and specific analysis goals
-2. Use appropriate tools (web scraper, API connections, Contentstack tools) to collect relevant data
-3. Analyze the collected information systematically
-4. Present findings in a clear, organized manner with actionable insights
-5. Offer to explore specific aspects in greater depth if needed
-
-## Response Guidelines
-
-- Provide technical explanations that match the user's expertise level
-- Always include evidence-based observations rather than assumptions
-- When suggesting improvements, explain the reasoning and potential benefits
-- Use appropriate data visualization or structured formats to present complex information
-- Acknowledge limitations in your analysis when data is incomplete
-- **When using Contentstack tools, clearly state which tool you are using and why.**
-- **Handle potential errors from tools gracefully and inform the user.**
-
-## Contentstack API Integration Examples
-
-### Content Type Creation Schema
-When creating a content type via the Management API, use the following JSON structure:
-
-<example>
-{
-  "content_type": {
-    "title": "Blog Post",
-    "uid": "blog_post",
-    "schema": [
-      {
-        "display_name": "Title",
-        "uid": "title",
-        "data_type": "text",
-        "mandatory": true,
-        "unique": true,
-        "field_metadata": {
-          "_default": true
-        },
-        "multiple": false
-      },
-      {
-        "display_name": "URL",
-        "uid": "url",
-        "data_type": "text",
-        "mandatory": true,
-        "field_metadata": {
-          "_default": true
-        },
-        "multiple": false,
-        "unique": false
-      },
-      {
-        "display_name": "Author",
-        "uid": "author",
-        "data_type": "text",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Content",
-        "uid": "content",
-        "data_type": "rich_text_editor",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Featured Image",
-        "uid": "featured_image",
-        "data_type": "file",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Categories",
-        "uid": "categories",
-        "data_type": "reference",
-        "reference_to": "category",
-        "multiple": true
-      }
-    ],
-    "options": {
-      "is_page": true,
-      "singleton": false,
-      "title": "title",
-      "sub_title": [],
-      "url_pattern": "/:title",
-      "url_prefix": "/"
-    }
-  }
-}
-</example>
-
-### Entry Creation Schema
-When creating an entry for a content type via the Management API, use the following JSON structure:
-
-<example>
-{
-  "entry": {
-    "title": "Example Blog Post",
-    "url": "/example-blog-post",
-    "author": "John Doe",
-    "content": "<p>This is the content of the blog post.</p>",
-    "featured_image": "asset_uid",
-    "categories": [
-      {
-        "uid": "category_uid_1",
-        "_content_type_uid": "category"
-      },
-      {
-        "uid": "category_uid_2",
-        "_content_type_uid": "category"
-      }
-    ]
-  }
-}
-</example>
-
-### Entry with JSON RTE Schema
-When creating an entry with JSON Rich Text Editor field:
-
-<example>
-{
-  "entry": {
-    "title": "Entry with JSON RTE",
-    "url": "/entry-with-json-rte",
-    "json_rte_field": {
-      "type": "doc", 
-      "uid": "unique_doc_id", 
-      "children": [
-        {
-          "type": "p",
-          "uid": "unique_id_1",
-          "children": [
-            {
-              "text": "This is a paragraph with "
-            },
-            {
-              "text": "bold text",
-              "bold": true
-            },
-            {
-              "text": " and "
-            },
-            {
-              "text": "italic text",
-              "italic": true
-            }
-          ]
-        },
-        {
-          "type": "h1",
-          "uid": "unique_id_2",
-          "children": [
-            {
-              "text": "This is a heading"
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
-</example>
-
-### Entry with Taxonomy Schema
-When creating an entry with taxonomy fields:
-
-<example>
-{
-  "entry": {
-    "title": "Entry with Taxonomy",
-    "url": "/entry-with-taxonomy",
-    "taxonomies": { 
-        "taxonomy_uid_1": [ 
-          { "term_uid": "term_uid_a", "term_name": "Term A", "taxonomy_uid": "taxonomy_uid_1"}, 
-          { "term_uid": "term_uid_b", "term_name": "Term B", "taxonomy_uid": "taxonomy_uid_1"}
-        ],
-       "taxonomy_uid_2": [
-          { "term_uid": "term_uid_c", "term_name": "Term C", "taxonomy_uid": "taxonomy_uid_2"}
-       ]
-      }
-    }
-}
-</example>
-
-## Ethical Considerations
-
-- Respect website terms of service and robots.txt directives when scraping
-- Do not attempt to access restricted areas or private information
-- Only analyze publicly available content
-- Inform users of potential rate limiting or access issues with external APIs
-
-You are a collaborative assistant who helps users better understand their content ecosystems and make informed decisions about content management strategies.
-`,
-				messages: messages,
-				tools: tools, // Pass the defined tools here
+		
+		// Add OpenAI models if API key is available
+		if (OPENAI_API_KEY) {
+			Object.keys(OPENAI_MODELS).forEach(modelId => {
+				availableModels[modelId] = OPENAI_MODELS[modelId];
 			});
-
-			console.log(`Anthropic response stop_reason: ${apiResponse.stop_reason}`);
-
-			// Check if the response requires tool use
-			if (apiResponse.stop_reason === "tool_use") {
-				const toolUses = apiResponse.content.filter(
-					(block) => block.type === "tool_use",
-				);
-
-				// Add the assistant's tool use request message to history
-				messages.push({ role: apiResponse.role, content: apiResponse.content });
-
-				// Execute tools and gather results
-				const toolResults = [];
-				for (const toolUse of toolUses) {
-					const toolName = toolUse.name;
-					const toolInput = toolUse.input;
-					const toolUseId = toolUse.id;
-
-					const result = await executeTool(toolName, toolInput);
-
-					toolResults.push({
-						type: "tool_result",
-						tool_use_id: toolUseId,
-						content: JSON.stringify(result), // Send result back as a JSON string
-						// You can also send simple text: content: "Tool executed successfully."
-						// or indicate errors: is_error: true, content: "Error message"
-					});
-				}
-
-				// Add the tool results to the message history
-				messages.push({
-					role: "user", // Role is 'user' for tool_result messages
-					content: toolResults,
-				});
-				// Continue the loop to send results back to Anthropic
-			} else if (apiResponse.stop_reason === "end_turn") {
-				// If no tool use is needed, break the loop
-				break;
-			} else {
-				// Handle other stop reasons if necessary (e.g., 'max_tokens')
-				console.warn(`Unexpected stop_reason: ${apiResponse.stop_reason}`);
-				break;
-			}
-		} // End of while loop
-
-		// Extract the final text content from the response
-		const finalContent = apiResponse.content
-			.filter((block) => block.type === "text")
-			.map((block) => block.text)
-			.join("\\n");
-
-		console.log(
-			`Final analysis successful. Response length: ${finalContent.length} chars`,
-		);
-
-		// Send final response
+		}
+		
 		res.json({
 			success: true,
-			content: finalContent,
+			models: availableModels,
+			defaultModel: DEFAULT_MODEL
 		});
 	} catch (error) {
-		console.error("Error analyzing image:", error);
-
-		// Log the error details
-		const timestamp = new Date().toISOString().replace(/:/g, "-");
-		const errorLogPath = path.join(uploadsDir, `error_${timestamp}.log`);
-		fs.writeFileSync(
-			errorLogPath,
-			JSON.stringify(
-				{
-					timestamp: new Date().toISOString(),
-					error: error.message,
-					stack: error.stack,
-				},
-				null,
-				2,
-			),
-		);
-
+		console.error("Error getting models:", error);
 		res.status(500).json({
-			error: "Failed to analyze image",
-			details: error.message,
+			success: false,
+			error: "Failed to retrieve models",
+			details: error.message
 		});
 	}
 });
@@ -1034,6 +840,32 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 		// Get message from form data
 		const message = req.body.message;
 		const imageUrl = req.body.imageUrl; // Extract imageUrl from the request
+		const modelId = req.body.model || DEFAULT_MODEL; // Get requested model or use default
+		
+		// Get model info
+		const isAnthropicModel = ANTHROPIC_MODELS[modelId] !== undefined;
+		const isOpenAIModel = OPENAI_MODELS[modelId] !== undefined;
+		
+		// Check if requested model is available
+		if (isAnthropicModel && !ANTHROPIC_API_KEY) {
+			return res.status(400).json({
+				error: "Selected Anthropic model is not available. Anthropic API key is missing."
+			});
+		}
+		
+		if (isOpenAIModel && !OPENAI_API_KEY) {
+			return res.status(400).json({
+				error: "Selected OpenAI model is not available. OpenAI API key is missing."
+			});
+		}
+		
+		if (!isAnthropicModel && !isOpenAIModel) {
+			return res.status(400).json({
+				error: `Unknown model: ${modelId}`
+			});
+		}
+		
+		console.log(`Using model: ${modelId}`);
 		
 		// Get uploaded file if any
 		const uploadedFile = req.file;
@@ -1062,7 +894,7 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 					message: message,
 					hasImageUrl: !!imageUrl,
 					hasUploadedFile: !!uploadedFile,
-					uploadedFileName: uploadedFile ? uploadedFile.filename : null,
+					model: modelId,
 				},
 				null,
 				2,
@@ -1080,14 +912,10 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 			res.write(`data: ${JSON.stringify(data)}\n\n`);
 		};
 
-		// Initialize Anthropic client
-		const anthropic = new Anthropic({
-			apiKey: ANTHROPIC_API_KEY,
-		});
-
-		// Prepare initial messages
-		const content = [];
-
+		// Process image content if any
+		let base64Data = null;
+		let mediaType = null;
+		
 		// Process the file if uploaded
 		if (uploadedFile) {
 			console.log("Processing uploaded file for chat message");
@@ -1095,22 +923,12 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 				// Read the file content
 				const filePath = uploadedFile.path;
 				const fileData = fs.readFileSync(filePath);
-				const base64Data = fileData.toString('base64');
+				base64Data = fileData.toString('base64');
 				
 				// Determine media type from file mimetype
-				const mediaType = uploadedFile.mimetype || 'image/png';
+				mediaType = uploadedFile.mimetype || 'image/png';
 				
 				console.log(`Successfully read uploaded file, size: ${fileData.length} bytes`);
-				
-				// Add the image as the first content item
-				content.push({
-					type: "image",
-					source: {
-						type: "base64",
-						media_type: mediaType,
-						data: base64Data,
-					},
-				});
 			} catch (fileError) {
 				console.error("Error processing uploaded file:", fileError);
 				sendEvent("error", {
@@ -1125,25 +943,11 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 		else if (imageUrl) {
 			console.log("Processing image URL for chat message");
 
-			// Extract base64 data from the image URL
-			let base64Data;
-
 			// If it's already a data URL
 			if (imageUrl.startsWith("data:image/")) {
 				console.log("Processing data URL for chat");
-				const mediaType = imageUrl.split(';')[0].split(':')[1] || 'image/png';
+				mediaType = imageUrl.split(';')[0].split(':')[1] || 'image/png';
 				base64Data = imageUrl.split(",")[1];
-				
-				if (base64Data) {
-					content.push({
-						type: "image",
-						source: {
-							type: "base64",
-							media_type: mediaType,
-							data: base64Data,
-						},
-					});
-				}
 			} else if (imageUrl.startsWith("http")) {
 				console.log("Processing HTTP URL for chat");
 				try {
@@ -1162,23 +966,11 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 					base64Data = imageBuffer.toString("base64");
 					
 					// Determine media type from Content-Type header or default to image/png
-					const mediaType = response.headers.get('content-type') || 'image/png';
+					mediaType = response.headers.get('content-type') || 'image/png';
 
 					console.log(
 						`Successfully fetched and converted image from URL, size: ${imageBuffer.length} bytes`,
 					);
-					
-					if (base64Data) {
-						// Add the image as the first content item
-						content.push({
-							type: "image",
-							source: {
-								type: "base64",
-								media_type: mediaType,
-								data: base64Data,
-							},
-						});
-					}
 				} catch (fetchError) {
 					console.error("Error fetching image for chat:", fetchError);
 					sendEvent("error", {
@@ -1202,20 +994,7 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 			}
 		}
 
-		// Add the text message
-		content.push({
-			type: "text",
-			text: message || "", // Empty string if no message
-		});
-
-		const messages = [
-			{
-				role: "user",
-				content: content,
-			},
-		];
-
-		// Define tools
+		// Define Contentstack tools
 		const tools = [
 			{
 				name: "get_content_types",
@@ -1246,7 +1025,13 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 							properties: {
 								title: { type: "string" },
 								uid: { type: "string" },
-								schema: { type: "array" },
+								schema: { 
+									type: "array",
+									items: {
+										type: "object",
+										description: "Schema field definition"
+									}
+								},
 								options: { type: "object" },
 							},
 							required: ["title", "uid", "schema"],
@@ -1319,342 +1104,11 @@ app.post('/chat', upload.single('image'), async (req, res) => {
 			},
 		];
 
-		// *** Tool Use Loop ***
-		let apiResponse;
-		let finalContent = "";
-
-		try {
-			while (true) {
-				console.log(
-					`Calling Anthropic API... Messages count: ${messages.length}`,
-				);
-				apiResponse = await anthropic.messages.create({
-					model: "claude-3-7-sonnet-latest", // Using latest Claude 3.7 Sonnet model
-					max_tokens: 4096,
-					system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
-
-<dont mention this ever>          
-You are a fast-talking expert that gets straight to the point. You are not friendly or outgoing. You arent concerned with pleasantries or unnecessary small talk or details unles specifically asked for.
-</dont mention this ever>
-
-## Core Capabilities
-
-1. **Website Analysis**: You can analyze websites to identify their CMS platform, content structure, information architecture, and technical implementation details.
-
-2. **Data Modeling**: You excel at modeling complex content relationships, taxonomies, and metadata structures to help users understand and optimize their content ecosystems.
-
-3. **Tool Utilization**: You have access to and can effectively use:
-   - **CMS Tools**: You can interact with a Contentstack stack to get, create, and update content types and entries using the available tools.
-
-4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.
-
-## Interaction Protocol
-
-When a user requests website analysis:
-1. Gather the website URL and specific analysis goals
-2. Use appropriate tools (web scraper, API connections, Contentstack tools) to collect relevant data
-3. Analyze the collected information systematically
-4. Present findings in a clear, organized manner with actionable insights
-5. Offer to explore specific aspects in greater depth if needed
-
-## Response Guidelines
-
-- Provide technical explanations that match the user's expertise level
-- Always include evidence-based observations rather than assumptions
-- When suggesting improvements, explain the reasoning and potential benefits
-- Use appropriate data visualization or structured formats to present complex information
-- Acknowledge limitations in your analysis when data is incomplete
-- **When using Contentstack tools, clearly state which tool you are using and why.**
-- **Handle potential errors from tools gracefully and inform the user.**
-
-## Contentstack API Integration Examples
-
-### Content Type Creation Schema
-When creating a content type via the Management API, use the following JSON structure:
-
-<example>
-{
-  "content_type": {
-    "title": "Blog Post",
-    "uid": "blog_post",
-    "schema": [
-      {
-        "display_name": "Title",
-        "uid": "title",
-        "data_type": "text",
-        "mandatory": true,
-        "unique": true,
-        "field_metadata": {
-          "_default": true
-        },
-        "multiple": false
-      },
-      {
-        "display_name": "URL",
-        "uid": "url",
-        "data_type": "text",
-        "mandatory": true,
-        "field_metadata": {
-          "_default": true
-        },
-        "multiple": false,
-        "unique": false
-      },
-      {
-        "display_name": "Author",
-        "uid": "author",
-        "data_type": "text",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Content",
-        "uid": "content",
-        "data_type": "rich_text_editor",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Featured Image",
-        "uid": "featured_image",
-        "data_type": "file",
-        "mandatory": false,
-        "multiple": false
-      },
-      {
-        "display_name": "Categories",
-        "uid": "categories",
-        "data_type": "reference",
-        "reference_to": "category",
-        "multiple": true
-      }
-    ],
-    "options": {
-      "is_page": true,
-      "singleton": false,
-      "title": "title",
-      "sub_title": [],
-      "url_pattern": "/:title",
-      "url_prefix": "/"
-    }
-  }
-}
-</example>
-
-### Entry Creation Schema
-When creating an entry for a content type via the Management API, use the following JSON structure:
-
-<example>
-{
-  "entry": {
-    "title": "Example Blog Post",
-    "url": "/example-blog-post",
-    "author": "John Doe",
-    "content": "<p>This is the content of the blog post.</p>",
-    "featured_image": "asset_uid",
-    "categories": [
-      {
-        "uid": "category_uid_1",
-        "_content_type_uid": "category"
-      },
-      {
-        "uid": "category_uid_2",
-        "_content_type_uid": "category"
-      }
-    ]
-  }
-}
-</example>
-
-### Entry with JSON RTE Schema
-When creating an entry with JSON Rich Text Editor field:
-
-<example>
-{
-  "entry": {
-    "title": "Entry with JSON RTE",
-    "url": "/entry-with-json-rte",
-    "json_rte_field": {
-      "type": "doc", 
-      "uid": "unique_doc_id", 
-      "children": [
-        {
-          "type": "p",
-          "uid": "unique_id_1",
-          "children": [
-            {
-              "text": "This is a paragraph with "
-            },
-            {
-              "text": "bold text",
-              "bold": true
-            },
-            {
-              "text": " and "
-            },
-            {
-              "text": "italic text",
-              "italic": true
-            }
-          ]
-        },
-        {
-          "type": "h1",
-          "uid": "unique_id_2",
-          "children": [
-            {
-              "text": "This is a heading"
-            }
-          ]
-        }
-      ]
-    }
-  }
-}
-</example>
-
-### Entry with Taxonomy Schema
-When creating an entry with taxonomy fields:
-
-<example>
-{
-  "entry": {
-    "title": "Entry with Taxonomy",
-    "url": "/entry-with-taxonomy",
-    "taxonomies": { 
-        "taxonomy_uid_1": [ 
-          { "term_uid": "term_uid_a", "term_name": "Term A", "taxonomy_uid": "taxonomy_uid_1"}, 
-          { "term_uid": "term_uid_b", "term_name": "Term B", "taxonomy_uid": "taxonomy_uid_1"}
-        ],
-       "taxonomy_uid_2": [
-          { "term_uid": "term_uid_c", "term_name": "Term C", "taxonomy_uid": "taxonomy_uid_2"}
-       ]
-      }
-    }
-}
-</example>
-
-## Ethical Considerations
-
-- Respect website terms of service and robots.txt directives when scraping
-- Do not attempt to access restricted areas or private information
-- Only analyze publicly available content
-- Inform users of potential rate limiting or access issues with external APIs
-
-You are a collaborative assistant who helps users better understand their content ecosystems and make informed decisions about content management strategies.
-`,
-					messages: messages,
-					tools: tools, // Pass the defined tools here
-				});
-
-				console.log(
-					`Anthropic response stop_reason: ${apiResponse.stop_reason}`,
-				);
-
-				// Check if the response requires tool use
-				if (apiResponse.stop_reason === "tool_use") {
-					const toolUses = apiResponse.content.filter(
-						(block) => block.type === "tool_use",
-					);
-
-					// Add the assistant's tool use request message to history
-					messages.push({
-						role: apiResponse.role,
-						content: apiResponse.content,
-					});
-
-					// Send tool usage events to client
-					for (const toolUse of toolUses) {
-						const toolName = toolUse.name;
-						sendEvent("tool", {
-							name: toolName,
-							status: "started",
-							description: `Using tool: ${toolName}`,
-						});
-					}
-
-					// Execute tools and gather results
-					const toolResults = [];
-					for (const toolUse of toolUses) {
-						const toolName = toolUse.name;
-						const toolInput = toolUse.input;
-						const toolUseId = toolUse.id;
-
-						try {
-							const result = await executeTool(toolName, toolInput);
-
-							// Send tool completion event
-							sendEvent("tool", {
-								name: toolName,
-								status: "completed",
-								description: `Tool ${toolName} completed successfully`,
-							});
-
-							toolResults.push({
-								type: "tool_result",
-								tool_use_id: toolUseId,
-								content: JSON.stringify(result), // Send result back as a JSON string
-							});
-						} catch (toolError) {
-							console.error(`Error executing tool ${toolName}:`, toolError);
-
-							// Send tool error event
-							sendEvent("tool", {
-								name: toolName,
-								status: "failed",
-								description: `Tool ${toolName} failed: ${toolError.message}`,
-							});
-
-							toolResults.push({
-								type: "tool_result",
-								tool_use_id: toolUseId,
-								content: JSON.stringify({ error: toolError.message }),
-								is_error: true,
-							});
-						}
-					}
-
-					// Add the tool results to the message history
-					messages.push({
-						role: "user", // Role is 'user' for tool_result messages
-						content: toolResults,
-					});
-					// Continue the loop to send results back to Anthropic
-				} else if (apiResponse.stop_reason === "end_turn") {
-					// If no tool use is needed, break the loop
-					break;
-				} else {
-					// Handle other stop reasons if necessary (e.g., 'max_tokens')
-					console.warn(`Unexpected stop_reason: ${apiResponse.stop_reason}`);
-					break;
-				}
-			} // End of while loop
-
-			// Extract the final text content from the response
-			finalContent = apiResponse.content
-				.filter((block) => block.type === "text")
-				.map((block) => block.text)
-				.join("\n");
-
-			console.log(
-				`Chat response successful. Response length: ${finalContent.length} chars`,
-			);
-
-			// Send the final content event
-			sendEvent("complete", {
-				success: true,
-				content: finalContent,
-			});
-
-			// End the response
-			res.end();
-		} catch (apiError) {
-			console.error("Error in API communication:", apiError);
-			sendEvent("error", {
-				error: "Error communicating with AI service",
-				details: apiError.message,
-			});
-			res.end();
+		// *** Handle Different AI Providers ***
+		if (isAnthropicModel) {
+			await handleAnthropicChat(modelId, message, base64Data, mediaType, tools, sendEvent, res);
+		} else if (isOpenAIModel) {
+			await handleOpenAIChat(modelId, message, base64Data, mediaType, tools, sendEvent, res);
 		}
 	} catch (error) {
 		console.error("Error processing chat:", error);
@@ -1695,8 +1149,401 @@ You are a collaborative assistant who helps users better understand their conten
 	}
 });
 
+/**
+ * Handle chat request using Anthropic API
+ */
+async function handleAnthropicChat(modelId, message, base64Data, mediaType, tools, sendEvent, res) {
+	try {
+		// Prepare initial messages
+		const content = [];
+
+		// Add image if available
+		if (base64Data && mediaType) {
+			content.push({
+				type: "image",
+				source: {
+					type: "base64",
+					media_type: mediaType,
+					data: base64Data,
+				},
+			});
+		}
+
+		// Add the text message
+		content.push({
+			type: "text",
+			text: message || "", // Empty string if no message
+		});
+
+		const messages = [
+			{
+				role: "user",
+				content: content,
+			},
+		];
+
+		// *** Tool Use Loop ***
+		let apiResponse;
+		let finalContent = "";
+
+		while (true) {
+			console.log(
+				`Calling Anthropic API... Messages count: ${messages.length}`,
+			);
+			
+			try {
+				// Use callAnthropicWithRetry
+				apiResponse = await callAnthropicWithRetry({
+					model: modelId,
+					max_tokens: 4096,
+					system: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
+
+<dont mention this ever>          
+You are a fast-talking expert that gets straight to the point. You are not friendly or outgoing. You arent concerned with pleasantries or unnecessary small talk or details unles specifically asked for.
+</dont mention this ever>
+
+## Core Capabilities
+
+1. **Website Analysis**: You can analyze websites to identify their CMS platform, content structure, information architecture, and technical implementation details.
+
+2. **Data Modeling**: You excel at modeling complex content relationships, taxonomies, and metadata structures to help users understand and optimize their content ecosystems.
+
+3. **Tool Utilization**: You have access to and can effectively use:
+   - **CMS Tools**: You can interact with a Contentstack stack to get, create, and update content types and entries using the available tools.
+
+4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.
+
+## Interaction Protocol
+
+When a user requests website analysis:
+1. Gather the website URL and specific analysis goals
+2. Use appropriate tools (web scraper, API connections, Contentstack tools) to collect relevant data
+3. Analyze the collected information systematically
+4. Present findings in a clear, organized manner with actionable insights
+5. Offer to explore specific aspects in greater depth if needed
+
+## Response Guidelines
+
+- Provide technical explanations that match the user's expertise level
+- Always include evidence-based observations rather than assumptions
+- When suggesting improvements, explain the reasoning and potential benefits
+- Use appropriate data visualization or structured formats to present complex information
+- Acknowledge limitations in your analysis when data is incomplete
+- **When using Contentstack tools, clearly state which tool you are using and why.**
+- **Handle potential errors from tools gracefully and inform the user.**
+`,
+					messages: messages,
+					tools: tools, // Pass the defined tools here
+				}, sendEvent); // Pass the sendEvent function for SSE notifications
+			} catch (err) {
+				console.error("Failed to complete Anthropic API call after retries:", err);
+				sendEvent("error", {
+					error: "Failed to complete chat request after multiple attempts",
+					details: err.message,
+				});
+				res.end();
+				return;
+			}
+
+			console.log(
+				`Anthropic response stop_reason: ${apiResponse.stop_reason}`,
+			);
+
+			// Check if the response requires tool use
+			if (apiResponse.stop_reason === "tool_use") {
+				const toolUses = apiResponse.content.filter(
+					(block) => block.type === "tool_use",
+				);
+
+				// Add the assistant's tool use request message to history
+				messages.push({
+					role: apiResponse.role,
+					content: apiResponse.content,
+				});
+
+				// Send tool usage events to client
+				for (const toolUse of toolUses) {
+					const toolName = toolUse.name;
+					sendEvent("tool", {
+						name: toolName,
+						status: "started",
+						description: `Using tool: ${toolName}`,
+					});
+				}
+
+				// Execute tools and gather results
+				const toolResults = [];
+				for (const toolUse of toolUses) {
+					const toolName = toolUse.name;
+					const toolInput = toolUse.input;
+					const toolUseId = toolUse.id;
+
+					try {
+						const result = await executeTool(toolName, toolInput);
+
+						// Send tool completion event
+						sendEvent("tool", {
+							name: toolName,
+							status: "completed",
+							description: `Tool ${toolName} completed successfully`,
+						});
+
+						toolResults.push({
+							type: "tool_result",
+							tool_use_id: toolUseId,
+							content: JSON.stringify(result), // Send result back as a JSON string
+						});
+					} catch (toolError) {
+						console.error(`Error executing tool ${toolName}:`, toolError);
+
+						// Send tool error event
+						sendEvent("tool", {
+							name: toolName,
+							status: "failed",
+							description: `Tool ${toolName} failed: ${toolError.message}`,
+						});
+
+						toolResults.push({
+							type: "tool_result",
+							tool_use_id: toolUseId,
+							content: JSON.stringify({ error: toolError.message }),
+							is_error: true,
+						});
+					}
+				}
+
+				// Add the tool results to the message history
+				messages.push({
+					role: "user", // Role is 'user' for tool_result messages
+					content: toolResults,
+				});
+				// Continue the loop to send results back to Anthropic
+			} else if (apiResponse.stop_reason === "end_turn") {
+				// If no tool use is needed, break the loop
+				break;
+			} else {
+				// Handle other stop reasons if necessary (e.g., 'max_tokens')
+				console.warn(`Unexpected stop_reason: ${apiResponse.stop_reason}`);
+				break;
+			}
+		} // End of while loop
+
+		// Extract the final text content from the response
+		finalContent = apiResponse.content
+			.filter((block) => block.type === "text")
+			.map((block) => block.text)
+			.join("\n");
+
+		console.log(
+			`Chat response successful. Response length: ${finalContent.length} chars`,
+		);
+
+		// Send the final content event
+		sendEvent("complete", {
+			success: true,
+			content: finalContent,
+		});
+
+		// End the response
+		res.end();
+	} catch (apiError) {
+		console.error("Error in Anthropic API communication:", apiError);
+		sendEvent("error", {
+			error: "Error communicating with Anthropic AI service",
+			details: apiError.message,
+		});
+		res.end();
+	}
+}
+
+/**
+ * Handle chat request using OpenAI API
+ */
+async function handleOpenAIChat(modelId, message, base64Data, mediaType, tools, sendEvent, res) {
+	try {
+		// Prepare messages for OpenAI
+		const messages = [];
+		
+		// Add system message
+		messages.push({
+			role: "system",
+			content: `You are an expert CMS Analysis Assistant designed to help users understand, analyze, and optimize websites from a content management perspective. Your primary function is to provide insightful analysis of website architecture, content organization, and technical implementation of content management systems.
+
+You are a fast-talking expert that gets straight to the point. You are not friendly or outgoing. You aren't concerned with pleasantries or unnecessary small talk or details unless specifically asked for.
+
+## Core Capabilities
+
+1. **Website Analysis**: You can analyze websites to identify their CMS platform, content structure, information architecture, and technical implementation details.
+
+2. **Data Modeling**: You excel at modeling complex content relationships, taxonomies, and metadata structures to help users understand and optimize their content ecosystems.
+
+3. **Tool Utilization**: You have access to and can effectively use:
+   - **CMS Tools**: You can interact with a Contentstack stack to get, create, and update content types and entries using the available tools.
+
+4. **Performance Assessment**: You can evaluate website performance related to content delivery, SEO optimization, and user experience.`
+		});
+		
+		// Build user message content
+		const userMessage = { role: "user", content: [] };
+		
+		// Add image if available
+		if (base64Data && mediaType) {
+			userMessage.content.push({
+				type: "image_url",
+				image_url: {
+					url: `data:${mediaType};base64,${base64Data}`
+				}
+			});
+		}
+		
+		// Add text message
+		userMessage.content.push({
+			type: "text", 
+			text: message || ""
+		});
+		
+		messages.push(userMessage);
+		
+		// Convert Anthropic tool format to OpenAI function calling format
+		const openAIFunctions = tools.map(tool => ({
+			type: "function",
+			function: {
+				name: tool.name,
+				description: tool.description,
+				parameters: tool.input_schema
+			}
+		}));
+		
+		// Call OpenAI API
+		console.log(`Calling OpenAI API with model ${modelId}...`);
+		
+		try {
+			const completion = await callOpenAIWithRetry({
+				model: modelId,
+				messages: messages,
+				tools: openAIFunctions,
+				temperature: 0.7,
+				max_tokens: 4096,
+				tool_choice: "auto"
+			}, sendEvent);
+			
+			console.log("OpenAI response received");
+			
+			// Handle tool calls
+			let currentResponse = completion;
+			const fullMessages = [...messages]; // Track all messages for subsequent calls
+						
+			// While the model wants to call tools
+			while (currentResponse.choices[0].message.tool_calls) {
+				// Add assistant response to message history
+				fullMessages.push(currentResponse.choices[0].message);
+				
+				const toolCalls = currentResponse.choices[0].message.tool_calls;
+				
+				// Send tool usage events to client
+				for (const toolCall of toolCalls) {
+					const functionName = toolCall.function.name;
+					sendEvent("tool", {
+						name: functionName,
+						status: "started",
+						description: `Using tool: ${functionName}`,
+					});
+				}
+				
+				// Execute each tool call
+				const toolResults = [];
+				for (const toolCall of toolCalls) {
+					const functionName = toolCall.function.name;
+					const functionArgs = JSON.parse(toolCall.function.arguments);
+					
+					try {
+						const result = await executeTool(functionName, functionArgs);
+						
+						// Send completion event
+						sendEvent("tool", {
+							name: functionName,
+							status: "completed",
+							description: `Tool ${functionName} completed successfully`,
+						});
+						
+						// Add result to messages
+						toolResults.push({
+							role: "tool",
+							tool_call_id: toolCall.id,
+							name: functionName,
+							content: JSON.stringify(result)
+						});
+					} catch (toolError) {
+						console.error(`Error executing tool ${functionName}:`, toolError);
+						
+						// Send tool error event
+						sendEvent("tool", {
+							name: functionName,
+							status: "failed",
+							description: `Tool ${functionName} failed: ${toolError.message}`,
+						});
+						
+						// Add error result
+						toolResults.push({
+							role: "tool",
+							tool_call_id: toolCall.id,
+							name: functionName,
+							content: JSON.stringify({ error: toolError.message })
+						});
+					}
+				}
+				
+				// Add all tool results to messages
+				fullMessages.push(...toolResults);
+				
+				// Call API again with updated messages
+				currentResponse = await callOpenAIWithRetry({
+					model: modelId,
+					messages: fullMessages,
+					tools: openAIFunctions,
+					temperature: 0.7,
+					max_tokens: 4096,
+				}, sendEvent);
+			}
+			
+			// Extract final content
+			const finalContent = currentResponse.choices[0].message.content;
+			
+			console.log(`Chat response successful. Response length: ${finalContent.length} chars`);
+			
+			// Send final response
+			sendEvent("complete", {
+				success: true,
+				content: finalContent,
+			});
+			
+			// End the response
+			res.end();
+		} catch (err) {
+			console.error("Failed to complete OpenAI API call after retries:", err);
+			sendEvent("error", {
+				error: "Failed to complete chat request after multiple attempts",
+				details: err.message,
+			});
+			res.end();
+		}
+	} catch (apiError) {
+		console.error("Error in OpenAI API communication:", apiError);
+		sendEvent("error", {
+			error: "Error communicating with OpenAI service",
+			details: apiError.message,
+		});
+		res.end();
+	}
+}
+
 // Start the server
 app.listen(PORT, () => {
 	console.log(`Server is running on http://localhost:${PORT}`);
 	console.log(`Images will be available at http://localhost:${PORT}/images/`);
+	
+	// Log available models
+	const anthropicModelsAvailable = ANTHROPIC_API_KEY ? Object.keys(ANTHROPIC_MODELS).length : 0;
+	const openaiModelsAvailable = OPENAI_API_KEY ? Object.keys(OPENAI_MODELS).length : 0;
+	console.log(`Available models: ${anthropicModelsAvailable} Anthropic models, ${openaiModelsAvailable} OpenAI models`);
 });

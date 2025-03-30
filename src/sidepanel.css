@@ -192,4 +192,58 @@
 /* --- Settings Tab Styles (Placeholder) --- */
 #settings-content {
   padding: 15px;
+}
+
+.message-content {
+  white-space: pre-wrap; /* Preserves whitespace and wraps text */
+  word-wrap: break-word; /* Breaks long words */
+  overflow-wrap: break-word; /* Ensure long words break */
+  padding: 8px 12px;
+  border-radius: 18px;
+  max-width: 90%; /* Prevent messages from spanning the entire width */
+}
+
+/* Add styles for images within message content */
+.message-content img {
+  display: block; /* Ensure image takes its own line */
+  max-width: 100%; /* Prevent image overflow */
+  height: auto; /* Maintain aspect ratio */
+  margin-top: 8px; /* Add some space above the image */
+  margin-bottom: 4px; /* Reduce space below the image */
+  border-radius: 6px; /* Slightly rounded corners */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+  border: 1px solid rgba(0, 0, 0, 0.05); /* Very light border */
+}
+
+/* --- History Tab Styles --- */
+#history-toolbar {
+  display: flex;
+  justify-content: flex-end; /* Align button to the right */
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background-color: var(--background-secondary);
+}
+
+#delete-all-history-button {
+  background-color: var(--button-secondary-bg);
+  color: var(--button-secondary-text);
+  border: 1px solid var(--border-color);
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: var(--border-radius);
+  cursor: pointer;
+  display: inline-flex; /* Align icon and text */
+  align-items: center;
+  gap: 4px; /* Space between icon and text */
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+#delete-all-history-button svg {
+  width: 14px; /* Adjust icon size */
+  height: 14px;
+}
+
+#delete-all-history-button:hover {
+  background-color: var(--button-secondary-hover-bg);
+  border-color: var(--button-secondary-hover-border);
 } 

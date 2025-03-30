@@ -12,6 +12,55 @@ const { log, error: logError } = createSidePanelLogger();
 // We\'ll import marked lazily when needed
 let markedModule: any = null;
 
+// Extend the HTMLSelectElement interface to add the hasEventListener property
+declare global {
+  interface HTMLSelectElement {
+    hasEventListener?: boolean;
+  }
+}
+
+// --- DOM Elements ---
+const selectionToggle = document.getElementById(
+  "selection-toggle"
+) as HTMLButtonElement | null;
+const imagePreview = document.getElementById("image-preview") as HTMLDivElement | null;
+const loadingSpinner = document.getElementById(
+  "loading-spinner"
+) as HTMLDivElement | null;
+const promptSection = document.getElementById("prompt-section") as HTMLDivElement | null;
+const promptButtons = document.querySelectorAll(".prompt-button[data-prompt-id]");
+const customPromptTextarea = document.getElementById(
+  "custom-prompt-textarea"
+) as HTMLTextAreaElement | null;
+const analyzeCustomPromptButton = document.getElementById(
+  "analyze-custom-prompt-button"
+) as HTMLButtonElement | null;
+const analysisResults = document.getElementById(
+  "analysis-results"
+) as HTMLDivElement | null;
+const chatLoader = document.getElementById("chat-loader") as HTMLDivElement | null;
+const historyList = document.getElementById("history-list") as HTMLUListElement | null;
+const deleteAllHistoryButton = document.getElementById(
+  "delete-all-history-button"
+) as HTMLButtonElement | null;
+const tabButtons = document.querySelectorAll(".tab-button");
+const tabContents = document.querySelectorAll(".tab-content");
+const chatMessages = document.getElementById("chat-messages") as HTMLDivElement | null;
+const chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
+const chatSubmit = document.getElementById("chat-submit") as HTMLButtonElement | null;
+const chatImagePreview = document.querySelector(
+  ".chat-image-preview"
+) as HTMLDivElement | null;
+const chatImageThumbnail = document.querySelector(
+  ".chat-image-thumbnail"
+) as HTMLImageElement | null;
+const chatImageRemove = document.querySelector(
+  ".chat-image-remove"
+) as HTMLButtonElement | null;
+const chatModelSelector = document.getElementById(
+  "chat-model-selector"
+) as HTMLSelectElement | null;
+
 // --- State Variables ---
 let isSelectionModeActive = false;
 let currentTab: chrome.tabs.Tab | null = null;
@@ -22,16 +71,18 @@ let latestImageUrl: string | null = null;
 let latestProcessedImageUrl: string | null = null; // Store the processed image URL
 let loadedHistory: Capture[] = []; // In-memory store for loaded history
 let currentCaptureForAnalysis: Capture | null = null; // Track capture being analyzed/loaded from history
-let chatAttachedImage: string | null = null; // Store the image URL for chat attachment
+let chatAttachedImages: { id: string; url: string }[] = []; // Store multiple image URLs for chat attachment
+let isChatLoading = false; // Declare globally
 
-// DOM Elements
-let chatInput: HTMLTextAreaElement | null = null;
-let chatMessages: HTMLDivElement | null = null;
-let chatSubmitButton: HTMLButtonElement | null = null;
-let chatImagePreview: HTMLDivElement | null = null;
-let chatImageThumbnail: HTMLImageElement | null = null;
-let chatImageRemoveButton: HTMLButtonElement | null = null;
-let isChatLoading = false;
+// Global variable to store captures
+let captures: Capture[] = [];
+let availableModels: {
+  id: string;
+  name: string;
+  provider: string;
+  supportsVision: boolean;
+}[] = [];
+let selectedModel = ""; // Changed from string | null to string only
 
 // --- Type Definitions ---
 
@@ -105,6 +156,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     // Set up tab functionality
     setupTabs();
 
+    // Set up chat functionality
+    setupChat();
+
     // Load and display capture history
     try {
       loadedHistory = await loadCaptures();
@@ -128,6 +182,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (err) {
       logError("Failed to get active tab", err);
     }
+
+    // Fetch available models
+    fetchAvailableModels();
 
     // Get UI elements
     const selectionToggle = document.getElementById(
@@ -275,9 +332,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       await triggerAnalysis(customPromptText, "custom"); // Pass custom text and ID 'custom'
     });
     // --- End listener for custom prompt button ---
-
-    // Set up chat functionality
-    setupChat();
   } catch (error) {
     logError("Critical error during side panel initialization:", error);
     // Maybe display an error message to the user in the UI here
@@ -301,23 +355,39 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
       if (typeof message.data === "string") {
         latestProcessedImageUrl = message.data;
 
-        // If we have an attached image in chat and the chat preview is still open,
-        // update it to use the processed version
-        if (
-          chatAttachedImage &&
-          chatImageThumbnail &&
-          chatImagePreview?.style.display === "flex" &&
-          latestProcessedImageUrl
-        ) {
-          log("Updating chat thumbnail to use processed image");
-          chatAttachedImage = latestProcessedImageUrl;
-          chatImageThumbnail.src = latestProcessedImageUrl;
-          log(
-            `Updated chat thumbnail to processed image: ${latestProcessedImageUrl.substring(
-              0,
-              50
-            )}...`
-          );
+        // Check if we're on the chat tab and need to attach the processed image
+        const chatTab = document.getElementById("tab-4");
+        const isChatTabActive = chatTab?.classList.contains("active");
+
+        if (isChatTabActive && chatImagePreview) {
+          // Remove the processing indicator if it exists
+          removeProcessingImageIndicator();
+
+          // Attach the processed image to chat
+          if (latestProcessedImageUrl) {
+            log("Attaching processed image to chat");
+            attachImageToChat(latestProcessedImageUrl);
+          }
+        }
+
+        // Also update any existing chat attachments to use the processed version
+        if (chatAttachedImages.length > 0 && latestImageUrl) {
+          log("Updating chat thumbnails to use processed images");
+          chatAttachedImages.forEach((attachment, index) => {
+            if (attachment.url === latestImageUrl && latestProcessedImageUrl) {
+              // Update the attachment URL
+              chatAttachedImages[index].url = latestProcessedImageUrl;
+
+              // Update the image src in the DOM if it exists
+              const thumbnailImg = document.querySelector(
+                `.chat-attachment-item[data-id="${attachment.id}"] .chat-image-thumbnail`
+              ) as HTMLImageElement | null;
+
+              if (thumbnailImg) {
+                thumbnailImg.src = latestProcessedImageUrl;
+              }
+            }
+          });
         }
       }
       break;
@@ -350,6 +420,25 @@ chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
     case "chatToolUsage":
       log("Chat tool usage message received");
       displayToolUsage(message.toolInfo);
+      break;
+
+    case "updateHistory":
+      log("Received history update:", message.captures);
+      captures = message.captures || [];
+      displayHistory(captures);
+      // If the currently viewed capture in the analysis tab was deleted, clear the view
+      const currentCaptureId =
+        document.getElementById("image-preview")?.dataset.captureId;
+      if (currentCaptureId && !captures.some((c) => c.id === currentCaptureId)) {
+        resetAnalysisUI();
+      }
+      break;
+
+    case "clearHistoryComplete":
+      log("History clear confirmed by background");
+      captures = []; // Update local state
+      displayHistory(captures); // Refresh UI to show empty state
+      // Optionally show a confirmation message to the user
       break;
 
     default:
@@ -394,7 +483,7 @@ function setupTabs(): void {
           log(`Activated tab content: ${tabId}`);
 
           // Handle the special case: switching to chat tab with a recent image
-          if (isChatTab && latestImageUrl && !chatAttachedImage) {
+          if (isChatTab && latestImageUrl && chatAttachedImages.length === 0) {
             // Ask if the user wants to attach the image to chat
             const shouldAttach = confirm(
               "Would you like to attach the most recent screenshot to your chat?"
@@ -550,9 +639,21 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
   const isChatTabActive = chatTab?.classList.contains("active");
 
   if (isChatTabActive) {
-    // If we're on the chat tab, attach the image to the chat
-    // This will create a clean attachment with the new image
-    attachImageToChat(dataUrl);
+    // If we're on the chat tab, send image for processing first
+    // The background script will handle processing and return the processed image URL
+    log("Sending image for server processing before attaching to chat");
+    await chrome.runtime.sendMessage({
+      action: "processImage",
+      imageData: dataUrl,
+      source: "sidePanel",
+    });
+
+    // Note: We won't immediately attach anything.
+    // Instead, we'll wait for the "processedImageReady" message
+    // and then attach the processed image
+
+    // Show a temporary loading indicator in the chat
+    showProcessingImageIndicator();
   } else {
     // Regular flow for analysis tab
     displayImage(dataUrl);
@@ -569,21 +670,169 @@ async function handleScreenshotCaptured(dataUrl: string): Promise<void> {
   }
 }
 
+// Add a function to display a temporary indicator while image is being processed
+function showProcessingImageIndicator(): void {
+  log("Showing image processing indicator");
+
+  if (!chatImagePreview) return;
+
+  // Create a loading indicator
+  const processingContainer = document.createElement("div");
+  processingContainer.id = "image-processing-indicator";
+  processingContainer.className = "chat-processing-indicator";
+  processingContainer.innerHTML = `
+    <div class="processing-spinner"></div>
+    <div class="processing-text">Processing image...</div>
+  `;
+
+  // Add some basic inline styles
+  processingContainer.style.display = "flex";
+  processingContainer.style.flexDirection = "column";
+  processingContainer.style.alignItems = "center";
+  processingContainer.style.padding = "16px";
+  processingContainer.style.color = "var(--text-secondary)";
+
+  // Make the preview visible if it's not already
+  chatImagePreview.style.display = "flex";
+
+  // Clear any existing content and add the processing indicator
+  const attachmentsContainer = chatImagePreview.querySelector(
+    ".chat-attachments-container"
+  );
+  if (attachmentsContainer) {
+    attachmentsContainer.innerHTML = "";
+    attachmentsContainer.appendChild(processingContainer);
+  } else {
+    const newContainer = document.createElement("div");
+    newContainer.className = "chat-attachments-container";
+    newContainer.appendChild(processingContainer);
+    chatImagePreview.appendChild(newContainer);
+  }
+}
+
+// Add a function to remove the processing indicator
+function removeProcessingImageIndicator(): void {
+  const indicator = document.getElementById("image-processing-indicator");
+  if (indicator) {
+    indicator.remove();
+  }
+}
+
 // Function to attach image to chat
 function attachImageToChat(imageUrl: string): void {
   log("Attaching image to chat");
 
-  // Clear any previous attached image first to avoid confusion
-  chatAttachedImage = null;
+  // Create a unique ID for this attachment
+  const attachmentId = Date.now().toString();
 
-  // Always use the image URL that was passed to this function
-  // This ensures we're always using the most recent selected image
-  chatAttachedImage = imageUrl;
+  // Add to the array of attachments
+  chatAttachedImages.push({ id: attachmentId, url: imageUrl });
 
-  if (chatImagePreview && chatImageThumbnail && chatAttachedImage) {
-    chatImageThumbnail.src = chatAttachedImage;
+  if (chatImagePreview) {
+    // Get or create the attachments container
+    let attachmentsContainer = chatImagePreview.querySelector(
+      ".chat-attachments-container"
+    );
+    if (!attachmentsContainer) {
+      attachmentsContainer = document.createElement("div");
+      attachmentsContainer.className = "chat-attachments-container";
+      chatImagePreview.appendChild(attachmentsContainer);
+    }
+
+    // Create and add the new attachment item
+    const attachmentItem = createAttachmentItem(attachmentId, imageUrl);
+    attachmentsContainer.appendChild(attachmentItem);
+
+    // Make the preview visible if it's not already
     chatImagePreview.style.display = "flex";
-    log(`Set chat thumbnail to image: ${chatAttachedImage.substring(0, 50)}...`);
+
+    // Log the appropriate message based on URL type
+    if (imageUrl.startsWith("data:")) {
+      log(`Added data URL attachment (id: ${attachmentId.substring(0, 8)}...)`);
+    } else {
+      log(
+        `Added attachment: ${imageUrl.substring(0, 30)}... (id: ${attachmentId.substring(
+          0,
+          8
+        )}...)`
+      );
+    }
+  }
+}
+
+// Helper function to create an attachment item
+function createAttachmentItem(id: string, url: string): HTMLElement {
+  const attachmentItem = document.createElement("div");
+  attachmentItem.className = "chat-attachment-item";
+  attachmentItem.dataset.id = id;
+
+  const img = document.createElement("img");
+  img.className = "chat-image-thumbnail";
+  img.src = url;
+  img.alt = "Image attachment";
+
+  const removeButton = document.createElement("button");
+  removeButton.className = "chat-attachment-remove";
+  removeButton.title = "Remove attachment";
+  removeButton.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18"></line>
+      <line x1="6" y1="6" x2="18" y2="18"></line>
+    </svg>
+  `;
+
+  // Add event listener to remove button
+  removeButton.addEventListener("click", (e) => {
+    e.stopPropagation(); // Prevent event bubbling
+    removeAttachment(id);
+  });
+
+  attachmentItem.appendChild(img);
+  attachmentItem.appendChild(removeButton);
+
+  return attachmentItem;
+}
+
+// Function to remove an attachment by ID
+function removeAttachment(attachmentId: string): void {
+  log(`Removing attachment: ${attachmentId}`);
+
+  // Remove from the array
+  chatAttachedImages = chatAttachedImages.filter((item) => item.id !== attachmentId);
+
+  // Remove from the DOM
+  if (chatImagePreview) {
+    const attachmentToRemove = chatImagePreview.querySelector(
+      `.chat-attachment-item[data-id="${attachmentId}"]`
+    );
+    if (attachmentToRemove) {
+      attachmentToRemove.remove();
+
+      // If no attachments left, hide the preview
+      const remainingAttachments = chatImagePreview.querySelectorAll(
+        ".chat-attachment-item"
+      );
+      if (remainingAttachments.length === 0) {
+        chatImagePreview.style.display = "none";
+      }
+    }
+  }
+}
+
+// Function to clear all attachments
+function clearAllAttachments(): void {
+  log("Clearing all chat attachments");
+
+  // Clear the array
+  chatAttachedImages = [];
+
+  // Clear the DOM
+  if (chatImagePreview) {
+    const container = chatImagePreview.querySelector(".chat-attachments-container");
+    if (container) {
+      container.innerHTML = "";
+    }
+    chatImagePreview.style.display = "none";
   }
 }
 
@@ -896,111 +1145,324 @@ function addCaptureToHistoryUI(capture: Capture): void {
 
 // --- Utility Functions ---
 
+/**
+ * Returns the full text for a predefined prompt ID.
+ */
 function getPromptTextById(promptId: string): string {
-  const prompts: { [key: string]: string } = {
-    describe: "Describe the visual content of this image and extract any text present.",
-    "extract-text": "Extract all text from this image.",
-    "analyze-ui":
-      "Analyze the UI/UX design of this screenshot. Identify key components, assess layout, usability, and suggest improvements.",
-    "identify-content":
-      "Identify the main content sections or blocks visible in this image (e.g., header, footer, sidebar, article, product grid).",
-    "seo-analysis":
-      "Analyze this image from an SEO perspective. Suggest alt text, describe relevant content for surrounding text, and identify optimization opportunities if it were on a webpage.",
-    "content-type-json":
-      "Based on the content in this image, create a simple JSON structure representing a potential content type definition suitable for a headless CMS. Include relevant fields and estimate their types (e.g., text, image, number).",
-  };
-  return prompts[promptId] || prompts.describe; // Default to describe if ID is unknown
+  // Use the PREDEFINED_PROMPTS array defined earlier
+  const prompt = PREDEFINED_PROMPTS.find((p) => p.id === promptId);
+  return prompt ? prompt.text : getPromptTextById("describe"); // Fallback to describe text
 }
 
 function setupChat(): void {
-  try {
-    log("Setting up chat functionality");
+  log("Setting up chat functionality");
 
-    // Get DOM elements
-    chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
-    chatMessages = document.getElementById("chat-messages") as HTMLDivElement | null;
-    chatSubmitButton = document.getElementById("chat-submit") as HTMLButtonElement | null;
-    chatImagePreview = document.querySelector(
-      ".chat-image-preview"
-    ) as HTMLDivElement | null;
-    chatImageThumbnail = document.querySelector(
-      ".chat-image-thumbnail"
-    ) as HTMLImageElement | null;
-    chatImageRemoveButton = document.querySelector(
-      ".chat-image-remove"
-    ) as HTMLButtonElement | null;
+  // Get UI elements
+  const chatMessages = document.getElementById("chat-messages");
+  const chatInput = document.getElementById("chat-input") as HTMLTextAreaElement | null;
+  const chatSubmit = document.getElementById("chat-submit") as HTMLButtonElement | null;
+  const chatImagePreview = document.querySelector(
+    ".chat-image-preview"
+  ) as HTMLDivElement | null;
 
-    if (
-      !chatInput ||
-      !chatMessages ||
-      !chatSubmitButton ||
-      !chatImagePreview ||
-      !chatImageThumbnail ||
-      !chatImageRemoveButton
-    ) {
-      logError("Chat UI elements not found");
-      return;
+  // Chat actions elements
+  const chatActionsToggle = document.getElementById(
+    "chat-actions-toggle"
+  ) as HTMLButtonElement | null;
+  const chatActionsMenu = document.getElementById(
+    "chat-actions-menu"
+  ) as HTMLDivElement | null;
+  const chatActionButtons = document.querySelectorAll(".chat-action-button");
+
+  if (
+    !chatMessages ||
+    !chatInput ||
+    !chatSubmit ||
+    !chatActionsToggle ||
+    !chatActionsMenu
+  ) {
+    logError("Required chat UI elements not found");
+    return;
+  }
+
+  // Setup chat actions toggle functionality
+  chatActionsToggle.addEventListener("click", (e) => {
+    e.stopPropagation(); // Prevent event from bubbling up
+    chatActionsMenu.classList.toggle("visible");
+  });
+
+  // Close menu when clicking outside
+  document.addEventListener("click", (e) => {
+    if (chatActionsMenu.classList.contains("visible")) {
+      chatActionsMenu.classList.remove("visible");
     }
+  });
 
-    // Add event listener for the submit button
-    chatSubmitButton.addEventListener("click", submitChatMessage);
+  // Prevent menu from closing when clicking inside it
+  chatActionsMenu.addEventListener("click", (e) => {
+    e.stopPropagation();
+  });
 
-    // Add event listener for Enter key (but allow Shift+Enter for new lines)
-    chatInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        submitChatMessage();
-      }
+  // Setup action button handlers
+  chatActionButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.getAttribute("data-action");
+      handleChatAction(action);
+      chatActionsMenu.classList.remove("visible");
     });
+  });
 
-    // Add event listener for the remove button
-    chatImageRemoveButton.addEventListener("click", () => {
-      chatAttachedImage = null;
-      if (chatImagePreview && chatImageThumbnail) {
-        chatImagePreview.style.display = "none";
-        chatImageThumbnail.src = "";
-      }
+  // Submit on Enter key (without Shift)
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submitChatMessage();
+    }
+  });
+
+  // Submit on button click
+  chatSubmit.addEventListener("click", submitChatMessage);
+
+  // Setup chat model selector (if not already set up by fetchAvailableModels)
+  if (chatModelSelector && !chatModelSelector.hasEventListener) {
+    chatModelSelector.addEventListener("change", () => {
+      selectedModel = chatModelSelector.value;
+      log("Selected model changed to:", selectedModel);
     });
+    chatModelSelector.hasEventListener = true;
+  }
 
-    log("Chat functionality setup complete");
-  } catch (error) {
-    logError("Error setting up chat functionality:", error);
+  log("Chat setup completed");
+}
+
+// Function to handle chat action button clicks
+function handleChatAction(action: string | null): void {
+  if (!action) return;
+
+  log(`Chat action triggered: ${action}`);
+
+  switch (action) {
+    case "site-analysis":
+      // Site analysis functionality
+      log("Site Analysis action triggered");
+      const siteAnalysisMessage = "Run site analysis on this page";
+
+      // Add the message to chat UI
+      addMessageToChat("user", siteAnalysisMessage);
+
+      // Send the message to the assistant
+      sendChatMessage(siteAnalysisMessage);
+      break;
+
+    case "visual-analysis":
+    case "capture-snippet":
+      // Visual Analysis (Capture Page) and Capture Snippet functionality
+      const actionName =
+        action === "visual-analysis" ? "Capture Page" : "Capture Snippet";
+      log(`${actionName} action triggered`);
+
+      // If it's a capture snippet, use the selection mode
+      if (action === "capture-snippet") {
+        // Use the existing selection mode toggle logic for "Capture Snippet"
+        const wasActive = isSelectionModeActive;
+        isSelectionModeActive = true; // Always activate (not toggle) when clicked
+
+        // Update UI state
+        const selectionToggle = document.getElementById(
+          "selection-toggle"
+        ) as HTMLButtonElement | null;
+
+        if (selectionToggle) {
+          updateSelectionToggleState(isSelectionModeActive, selectionToggle);
+        }
+
+        // Send message to background script to enter selection mode
+        chrome.runtime
+          .sendMessage({
+            action: "toggleSelectionMode",
+            active: true, // Always true when initiating from action buttons
+            source: "sidePanel",
+          })
+          .then((response) => {
+            log(`Background response for toggleSelectionMode:`, response);
+            if (response && response.status === "error") {
+              logError(`Error toggling selection mode:`, response.message);
+              // Revert state on error
+              isSelectionModeActive = wasActive;
+              if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
+            }
+          })
+          .catch((error) => {
+            logError(`Failed to send toggleSelectionMode message:`, error);
+            // Revert state on error
+            isSelectionModeActive = wasActive;
+            if (selectionToggle) updateSelectionToggleState(wasActive, selectionToggle);
+          });
+      } else {
+        // For "Capture Page", directly take a full page screenshot
+        log("Capturing full page screenshot");
+        showChatLoader(); // Show loading indicator
+
+        // Send message to background script to capture full page
+        chrome.runtime
+          .sendMessage({
+            action: "captureFullPage",
+            source: "sidePanel",
+          })
+          .then(async (response) => {
+            log(`Background response for captureFullPage:`, response);
+
+            if (response && response.status === "ok" && response.dataUrl) {
+              // Successfully captured screenshot
+              hideChatLoader();
+
+              // Attach the screenshot to the chat
+              attachImageToChat(response.dataUrl);
+
+              log("Full page screenshot captured and attached to chat");
+            } else if (response && response.status === "error") {
+              hideChatLoader();
+              logError(`Error capturing full page:`, response.message);
+              // Show error notification to user
+              const errorMsg = response.message || "Failed to capture screenshot";
+              alert(`Error: ${errorMsg}`);
+            }
+          })
+          .catch((error) => {
+            hideChatLoader();
+            logError(`Failed to send captureFullPage message:`, error);
+            alert("Error: Failed to capture screenshot");
+          });
+      }
+
+      // Close the actions menu
+      const chatActionsMenu = document.getElementById("chat-actions-menu");
+      if (chatActionsMenu) {
+        chatActionsMenu.classList.remove("visible");
+      }
+      break;
+
+    case "add-media":
+      // Add media functionality
+      log("Add Media action triggered");
+
+      // Create a hidden file input element
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = "image/*";
+      fileInput.style.display = "none";
+      document.body.appendChild(fileInput);
+
+      // Trigger a click on the file input
+      fileInput.click();
+
+      // Handle file selection
+      fileInput.addEventListener("change", (event) => {
+        const files = fileInput.files;
+        if (files && files.length > 0) {
+          const file = files[0];
+
+          // Check if it's an image
+          if (file.type.startsWith("image/")) {
+            log("Converting file to data URL");
+
+            // Create a FileReader to convert to data URL instead of blob URL
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              if (e.target && typeof e.target.result === "string") {
+                const dataUrl = e.target.result;
+
+                // Attach the image data URL to chat
+                attachImageToChat(dataUrl);
+
+                log("Image converted to data URL and attached to chat");
+              } else {
+                logError("Failed to read file as data URL");
+              }
+            };
+
+            reader.onerror = () => {
+              logError("Error reading file:", reader.error);
+            };
+
+            // Read the file as a data URL (base64)
+            reader.readAsDataURL(file);
+          } else {
+            logError("Selected file is not an image");
+          }
+        }
+
+        // Remove the file input from the DOM
+        document.body.removeChild(fileInput);
+      });
+      break;
+
+    default:
+      logError(`Unknown chat action: ${action}`);
   }
 }
 
 function submitChatMessage(): void {
-  if (!chatInput || !chatMessages || !chatSubmitButton || isChatLoading) return;
+  if (!chatInput || !chatMessages || !chatSubmit || isChatLoading) return;
 
   const message = chatInput.value.trim();
-  const hasImage = chatAttachedImage !== null;
+  const hasImage = chatAttachedImages.length > 0;
 
   if (!message && !hasImage) return; // Don't send empty messages without an image
 
-  log("Submitting chat message:", message, "with image:", hasImage);
+  log("Submitting chat message:", message, "with images:", chatAttachedImages.length);
 
-  // Add user message to chat with the currently attached image
-  addMessageToChat("user", message, chatAttachedImage);
+  // Create a single message with all images if there are multiple
+  if (hasImage) {
+    const messageEl = document.createElement("div");
+    messageEl.className = "chat-message user";
+
+    const contentEl = document.createElement("div");
+    contentEl.className = "message-content";
+
+    // Add all images to the message
+    chatAttachedImages.forEach(({ id, url }) => {
+      const imgEl = document.createElement("img");
+      imgEl.src = url;
+      imgEl.className = "chat-message-image";
+      imgEl.alt = "Attached image";
+      contentEl.appendChild(imgEl);
+    });
+
+    // Add text content if present
+    if (message) {
+      const breakEl = document.createElement("br");
+      contentEl.appendChild(breakEl);
+      const textNode = document.createTextNode(message);
+      contentEl.appendChild(textNode);
+    }
+
+    messageEl.appendChild(contentEl);
+    chatMessages?.appendChild(messageEl);
+
+    // Scroll to bottom
+    if (chatMessages) {
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+  } else {
+    // Just text message with no images
+    addMessageToChat("user", message);
+  }
 
   // Clear input
   chatInput.value = "";
 
-  // Hide and clear the image preview
-  if (chatImagePreview && chatImageThumbnail && hasImage) {
-    chatImagePreview.style.display = "none";
-    // Don't clear the src yet, we need it for the message
-  }
-
   // Show thinking indicator
   showThinkingIndicator();
 
-  // Get the image to send - prefer the processed image if it's the latest one
-  const imageToSend = chatAttachedImage;
+  // Collect all image URLs to send
+  const imageUrlsToSend = chatAttachedImages.map((item) => item.url).join(",");
 
-  // Send message to server with image (if any)
-  sendChatMessage(message, imageToSend);
+  // Send message to server with images (if any)
+  sendChatMessage(message, hasImage ? imageUrlsToSend : null);
 
-  // Clear the attached image after sending
-  chatAttachedImage = null;
+  // Clear all attachments
+  clearAllAttachments();
 }
 
 function addMessageToChat(
@@ -1082,8 +1544,8 @@ function showThinkingIndicator(): void {
   chatMessages.appendChild(messageElement);
   chatMessages.scrollTop = chatMessages.scrollHeight;
 
-  if (chatSubmitButton) {
-    chatSubmitButton.disabled = true;
+  if (chatSubmit) {
+    chatSubmit.disabled = true;
   }
 }
 
@@ -1095,24 +1557,98 @@ function hideThinkingIndicator(): void {
 
   isChatLoading = false;
 
-  if (chatSubmitButton) {
-    chatSubmitButton.disabled = false;
+  if (chatSubmit) {
+    chatSubmit.disabled = false;
   }
 }
 
 async function sendChatMessage(
   message: string,
-  imageUrl: string | null = null
+  imageUrls: string | null = null
 ): Promise<void> {
   try {
-    log("Sending chat message to background script" + (imageUrl ? " with image" : ""));
+    // If we have multiple image URLs (comma-separated), handle each one
+    let processedImageUrls = imageUrls;
 
-    const response = await chrome.runtime.sendMessage({
+    if (imageUrls && imageUrls.includes(",")) {
+      // Split by comma and process each URL
+      const urls = imageUrls.split(",");
+      const processedUrls = await Promise.all(
+        urls.map(async (url) => {
+          // Process blob URLs if needed
+          if (url.startsWith("blob:")) {
+            try {
+              return await convertBlobToDataUrl(url);
+            } catch (error) {
+              logError(
+                `Failed to convert blob URL to data URL: ${url.substring(0, 30)}...`,
+                error
+              );
+              return null; // Skip this URL if conversion fails
+            }
+          }
+          return url;
+        })
+      );
+
+      // Filter out any nulls from failed conversions
+      const validUrls = processedUrls.filter((url) => url !== null);
+      processedImageUrls = validUrls.join(",");
+    }
+    // Handle single blob URL
+    else if (imageUrls && imageUrls.startsWith("blob:")) {
+      try {
+        processedImageUrls = await convertBlobToDataUrl(imageUrls);
+      } catch (error) {
+        logError("Error converting blob URL to data URL:", error);
+        processedImageUrls = null;
+      }
+    }
+
+    // Resize any data URL images to prevent Multer errors
+    if (processedImageUrls) {
+      if (processedImageUrls.includes(",")) {
+        // Multiple images
+        const urls = processedImageUrls.split(",");
+        const resizedUrls = await Promise.all(
+          urls.map(async (url) => {
+            if (url.startsWith("data:image")) {
+              return await resizeImage(url, 1200); // Max width 1200px
+            }
+            return url;
+          })
+        );
+        processedImageUrls = resizedUrls.join(",");
+      } else if (processedImageUrls.startsWith("data:image")) {
+        // Single image
+        processedImageUrls = await resizeImage(processedImageUrls, 1200); // Max width 1200px
+      }
+    }
+
+    log(
+      "Sending chat message to background script" +
+        (processedImageUrls ? " with images" : "") +
+        (selectedModel ? ` using model: ${selectedModel}` : "")
+    );
+
+    // Create the message object based on available parameters
+    const messagePayload: any = {
       action: "sendChatMessage",
       message,
-      imageUrl,
       source: "sidePanel",
-    });
+    };
+
+    // Only add imageUrl if it's not null
+    if (processedImageUrls) {
+      messagePayload.imageUrl = processedImageUrls;
+    }
+
+    // Only add model if it's not null and not an empty string
+    if (selectedModel && selectedModel.trim() !== "") {
+      messagePayload.model = selectedModel;
+    }
+
+    const response = await chrome.runtime.sendMessage(messagePayload);
 
     log("Received response from background script:", response);
 
@@ -1131,6 +1667,83 @@ async function sendChatMessage(
       "Sorry, there was an error sending your message. Please try again."
     );
   }
+}
+
+// Helper function to convert blob URL to data URL
+async function convertBlobToDataUrl(blobUrl: string): Promise<string> {
+  log("Converting blob URL to data URL");
+  // Fetch the image data and convert to data URL
+  const response = await fetch(blobUrl);
+  const blob = await response.blob();
+
+  // Use FileReader to convert blob to data URL
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("Failed to convert blob to data URL"));
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Helper function to resize an image and return a new data URL with reduced size
+async function resizeImage(dataUrl: string, maxWidth: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      // Calculate new dimensions while maintaining aspect ratio
+      let width = img.width;
+      let height = img.height;
+
+      if (width > maxWidth) {
+        height = (height * maxWidth) / width;
+        width = maxWidth;
+      }
+
+      // Create a canvas and resize the image
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Could not get canvas context"));
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Get the resized image as a data URL with reduced quality
+      // Using image/jpeg with 0.9 quality for better compression
+      const type = dataUrl.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+      const quality = type === "image/jpeg" ? 0.9 : undefined;
+
+      try {
+        const resizedDataUrl = canvas.toDataURL(type, quality);
+        log(
+          `Resized image from ${Math.round(dataUrl.length / 1024)}KB to ${Math.round(
+            resizedDataUrl.length / 1024
+          )}KB`
+        );
+        resolve(resizedDataUrl);
+      } catch (err) {
+        logError("Error generating resized data URL:", err);
+        resolve(dataUrl); // Fall back to original if resize fails
+      }
+    };
+
+    img.onerror = () => {
+      logError("Error loading image for resizing");
+      resolve(dataUrl); // Fall back to original if loading fails
+    };
+
+    img.src = dataUrl;
+  });
 }
 
 // Display tool usage information in the chat
@@ -1254,4 +1867,393 @@ function handleAnalysisError(error: string): void {
   setAnalysisLoadingState(false, `Analysis failed: ${error}`);
   analysisInProgress = false;
   selectedPromptId = null; // Reset selected prompt on error
+}
+
+/**
+ * Resets the UI elements in the Analysis tab to their initial state.
+ */
+const resetAnalysisUI = () => {
+  log("Resetting analysis UI");
+  if (imagePreview) {
+    imagePreview.style.display = "none";
+    imagePreview.innerHTML = ""; // Clear previous content like spinners or images
+    delete imagePreview.dataset.captureId; // Remove associated capture ID
+    // Re-add spinner
+    const spinner = document.createElement("div");
+    spinner.id = "loading-spinner";
+    spinner.classList.add("loading-spinner");
+    imagePreview.appendChild(spinner);
+  }
+  if (analysisResults) {
+    analysisResults.style.display = "none";
+    analysisResults.innerHTML = "";
+  }
+  if (promptSection) {
+    promptSection.style.display = "none"; // Hide prompts until new image is loaded
+  }
+  if (customPromptTextarea) {
+    customPromptTextarea.value = ""; // Clear custom prompt
+  }
+  hideChatLoader(); // Ensure chat loader is hidden
+};
+
+// Delete All History button click
+deleteAllHistoryButton?.addEventListener("click", () => {
+  log("Delete All History button clicked");
+  if (
+    window.confirm(
+      "Are you sure you want to delete all capture history? This action cannot be undone."
+    )
+  ) {
+    log("User confirmed history deletion");
+    chrome.runtime.sendMessage({ action: "clearHistory" }, (response) => {
+      if (chrome.runtime.lastError) {
+        logError("Error sending clearHistory message:", chrome.runtime.lastError);
+        alert("Failed to clear history. Please try again.");
+      } else {
+        log("clearHistory message sent successfully, response:", response);
+        // UI update happens when 'clearHistoryComplete' message is received
+      }
+    });
+  } else {
+    log("User cancelled history deletion");
+  }
+});
+
+/**
+ * Shows the chat loading indicator.
+ */
+const showChatLoader = () => {
+  if (chatLoader) {
+    chatLoader.style.display = "flex";
+  }
+  isChatLoading = true;
+};
+
+/**
+ * Hides the chat loading indicator.
+ */
+const hideChatLoader = () => {
+  if (chatLoader) {
+    chatLoader.style.display = "none";
+  }
+  isChatLoading = false;
+};
+
+// Function to fetch available models from the server
+async function fetchAvailableModels(): Promise<void> {
+  try {
+    log("Fetching available models from server");
+
+    const response = await fetch("http://localhost:3000/models");
+    if (!response.ok) {
+      throw new Error(`Failed to fetch models: ${response.status}`);
+    }
+
+    const responseData = await response.json();
+
+    if (!responseData.success) {
+      throw new Error("Failed to fetch models: Server returned unsuccessful response");
+    }
+
+    // Convert models object to array with ID included
+    const modelsArray = Object.entries(responseData.models).map(([id, modelData]) => ({
+      id,
+      ...(modelData as { name: string; provider: string; supportsVision: boolean }),
+    }));
+
+    availableModels = modelsArray;
+    log("Fetched models:", modelsArray);
+
+    // Populate the model selector dropdown
+    populateModelSelector(modelsArray);
+
+    // Set the default model if specified
+    if (responseData.defaultModel && chatModelSelector) {
+      selectedModel = responseData.defaultModel;
+      chatModelSelector.value = responseData.defaultModel;
+    }
+  } catch (error) {
+    logError("Error fetching models:", error);
+  }
+}
+
+// Function to populate the model selector dropdown
+function populateModelSelector(models: any[]): void {
+  if (!chatModelSelector) {
+    logError("Chat model selector element not found");
+    return;
+  }
+
+  // Show the model selector container
+  const modelSelectorContainer = document.querySelector(".model-selector-container");
+  if (modelSelectorContainer) {
+    modelSelectorContainer.classList.add("visible");
+  }
+
+  // Get the model selector menu
+  const modelSelectorMenu = document.getElementById("model-selector-menu");
+  const modelSelectorToggle = document.getElementById("model-selector-toggle");
+  const selectedModelDisplay = document.getElementById("selected-model-display");
+
+  if (!modelSelectorMenu || !modelSelectorToggle || !selectedModelDisplay) {
+    logError("Model selector elements not found");
+    return;
+  }
+
+  // Add click event listener for the toggle button
+  modelSelectorToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+
+    // Position the menu intelligently before showing it
+    positionModelSelectorMenu(modelSelectorMenu, modelSelectorToggle);
+
+    modelSelectorMenu.classList.toggle("visible");
+
+    // Add a click event listener to the document to close the menu when clicking outside
+    const closeMenu = (event: MouseEvent) => {
+      if (
+        !modelSelectorMenu.contains(event.target as Node) &&
+        event.target !== modelSelectorToggle
+      ) {
+        modelSelectorMenu.classList.remove("visible");
+        document.removeEventListener("click", closeMenu);
+      }
+    };
+
+    // Only add the event listener if the menu is now visible
+    if (modelSelectorMenu.classList.contains("visible")) {
+      // Use setTimeout to avoid immediate triggering of the event
+      setTimeout(() => {
+        document.addEventListener("click", closeMenu);
+      }, 0);
+    }
+  });
+
+  // Add function to position the model selector menu to avoid edge collisions
+  function positionModelSelectorMenu(menu: HTMLElement, toggle: HTMLElement): void {
+    // Reset any previous custom positioning to get accurate measurements
+    menu.style.right = "";
+    menu.style.left = "";
+    menu.style.bottom = "";
+    menu.style.top = "";
+
+    // Get dimensions and positions
+    const toggleRect = toggle.getBoundingClientRect();
+    const menuWidth = menu.offsetWidth || 200; // Fallback to estimated width if not yet rendered
+    const menuHeight = menu.offsetHeight || 300; // Fallback to estimated height
+    const sidebarWidth = document.body.clientWidth;
+    const sidebarHeight = document.body.clientHeight;
+
+    // Check for vertical positioning (above or below)
+    const spaceAbove = toggleRect.top;
+    const spaceBelow = sidebarHeight - toggleRect.bottom;
+
+    // Default to above if there's enough space, otherwise below
+    if (spaceAbove >= menuHeight || spaceAbove >= spaceBelow) {
+      menu.style.bottom = `${toggleRect.height + 8}px`; // 8px margin
+      menu.style.top = "auto";
+    } else {
+      menu.style.top = `${toggleRect.height + 8}px`; // 8px margin
+      menu.style.bottom = "auto";
+    }
+
+    // Check for horizontal positioning (left or right aligned)
+    const spaceToRight = sidebarWidth - toggleRect.left;
+    const spaceToLeft = toggleRect.right;
+
+    // Default to right-aligned if there's enough space, otherwise left-aligned
+    if (menuWidth <= spaceToRight) {
+      // Align left edge of menu with left edge of toggle
+      menu.style.left = "0";
+      menu.style.right = "auto";
+    } else if (menuWidth <= spaceToLeft) {
+      // Align right edge of menu with right edge of toggle
+      menu.style.right = "0";
+      menu.style.left = "auto";
+    } else {
+      // Not enough space on either side, center it as best as possible
+      // and let overflow handling deal with scrolling
+      menu.style.left = "0";
+      menu.style.right = "auto";
+
+      // If this would push it off the left edge, adjust
+      if (toggleRect.left - (menuWidth - toggleRect.width) / 2 < 0) {
+        menu.style.left = "0";
+      }
+    }
+
+    // Add some logging
+    log(
+      `Positioned model menu: ${JSON.stringify({
+        toggleRect: {
+          top: Math.round(toggleRect.top),
+          left: Math.round(toggleRect.left),
+          width: Math.round(toggleRect.width),
+          height: Math.round(toggleRect.height),
+        },
+        menuWidth: Math.round(menuWidth),
+        menuHeight: Math.round(menuHeight),
+        sidebarWidth: Math.round(sidebarWidth),
+        sidebarHeight: Math.round(sidebarHeight),
+        position: {
+          top: menu.style.top,
+          left: menu.style.left,
+          bottom: menu.style.bottom,
+          right: menu.style.right,
+        },
+      })}`
+    );
+  }
+
+  // Clear existing options in both select and custom menu
+  chatModelSelector.innerHTML = "";
+  modelSelectorMenu.innerHTML = "";
+
+  // Group models by provider
+  const modelsByProvider: Record<string, any[]> = {};
+  models.forEach((model) => {
+    if (!modelsByProvider[model.provider]) {
+      modelsByProvider[model.provider] = [];
+    }
+    modelsByProvider[model.provider].push(model);
+  });
+
+  // Create option groups for each provider
+  Object.entries(modelsByProvider).forEach(([provider, providerModels]) => {
+    // For the hidden select element
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = provider.charAt(0).toUpperCase() + provider.slice(1);
+
+    // For the custom flyout - add a provider label
+    const providerLabel = document.createElement("div");
+    providerLabel.className = "model-group-label";
+    providerLabel.textContent = provider.charAt(0).toUpperCase() + provider.slice(1);
+    modelSelectorMenu.appendChild(providerLabel);
+
+    // Add options for each model
+    providerModels.forEach((model) => {
+      // For the hidden select element
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.name;
+      optgroup.appendChild(option);
+
+      // For the custom flyout - create a button
+      const modelButton = document.createElement("button");
+      modelButton.className = "model-option";
+      modelButton.dataset.modelId = model.id;
+      modelButton.textContent = model.name;
+
+      // Add check icon for the currently selected model
+      if (model.id === selectedModel) {
+        modelButton.classList.add("selected");
+
+        // Add a check mark icon
+        const checkIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        checkIcon.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        checkIcon.setAttribute("width", "16");
+        checkIcon.setAttribute("height", "16");
+        checkIcon.setAttribute("viewBox", "0 0 24 24");
+        checkIcon.setAttribute("fill", "none");
+        checkIcon.setAttribute("stroke", "currentColor");
+        checkIcon.setAttribute("stroke-width", "2");
+        checkIcon.setAttribute("stroke-linecap", "round");
+        checkIcon.setAttribute("stroke-linejoin", "round");
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M20 6L9 17l-5-5");
+        checkIcon.appendChild(path);
+
+        modelButton.prepend(checkIcon);
+
+        // Update the model toggle button text
+        selectedModelDisplay.textContent = model.name;
+      }
+
+      // Add click event for model selection
+      modelButton.addEventListener("click", () => {
+        // Update the selected model
+        selectedModel = model.id;
+
+        // Update the hidden select element
+        chatModelSelector.value = selectedModel;
+
+        // Trigger change event on the select
+        chatModelSelector.dispatchEvent(new Event("change"));
+
+        // Update the UI
+        const allModelButtons = modelSelectorMenu.querySelectorAll(".model-option");
+        allModelButtons.forEach((btn) => {
+          btn.classList.remove("selected");
+
+          // Remove any existing check icons
+          const existingIcons = btn.querySelectorAll("svg");
+          existingIcons.forEach((icon) => icon.remove());
+        });
+
+        // Mark this button as selected and add the check icon
+        modelButton.classList.add("selected");
+
+        // Add a check mark icon
+        const checkIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        checkIcon.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        checkIcon.setAttribute("width", "16");
+        checkIcon.setAttribute("height", "16");
+        checkIcon.setAttribute("viewBox", "0 0 24 24");
+        checkIcon.setAttribute("fill", "none");
+        checkIcon.setAttribute("stroke", "currentColor");
+        checkIcon.setAttribute("stroke-width", "2");
+        checkIcon.setAttribute("stroke-linecap", "round");
+        checkIcon.setAttribute("stroke-linejoin", "round");
+
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M20 6L9 17l-5-5");
+        checkIcon.appendChild(path);
+
+        modelButton.prepend(checkIcon);
+
+        // Update the model toggle button text with the selected model name
+        selectedModelDisplay.textContent = model.name;
+
+        // Close the menu
+        modelSelectorMenu.classList.remove("visible");
+
+        log("Selected model changed to:", selectedModel);
+      });
+
+      modelSelectorMenu.appendChild(modelButton);
+    });
+
+    chatModelSelector.appendChild(optgroup);
+  });
+
+  // Set the first model as selected by default
+  if (models.length > 0 && !selectedModel) {
+    selectedModel = models[0].id;
+    chatModelSelector.value = selectedModel;
+
+    // Find the model name for the selected ID
+    const selectedModelData = models.find((model) => model.id === selectedModel);
+    if (selectedModelData) {
+      selectedModelDisplay.textContent = selectedModelData.name;
+    }
+  }
+
+  // Keep existing change event listener for the hidden select
+  // but remove any existing listeners first to prevent duplicates
+  if (!chatModelSelector.hasEventListener) {
+    chatModelSelector.addEventListener("change", () => {
+      selectedModel = chatModelSelector.value;
+
+      // Update the model toggle button text when the selection changes
+      const selectedModelData = models.find((model) => model.id === selectedModel);
+      if (selectedModelData && selectedModelDisplay) {
+        selectedModelDisplay.textContent = selectedModelData.name;
+      }
+
+      log("Selected model changed to:", selectedModel);
+    });
+    chatModelSelector.hasEventListener = true;
+  }
 }
